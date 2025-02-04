@@ -2,7 +2,7 @@ import streamlit as st
 from docx import Document
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
-from PyPDF2 import PdfMerger
+from PyPDF2 import PdfWriter, PdfReader
 import io
 import tempfile
 import os
@@ -30,48 +30,67 @@ def docx_to_pdf(docx_content):
 
     return temp_pdf.name
 
+def embed_files(main_pdf, files_to_embed):
+    # Create PDF writer object
+    pdf_writer = PdfWriter()
+
+    # Add the main PDF pages
+    pdf_reader = PdfReader(main_pdf)
+    for page in pdf_reader.pages:
+        pdf_writer.add_page(page)
+
+    # Embed each file as an attachment
+    for file in files_to_embed:
+        file_data = file.read()
+        filename = file.name
+        pdf_writer.add_attachment(filename, file_data)
+
+    return pdf_writer
+
 def main():
-    st.title("Document Converter and Merger")
+    st.title("PDF Document and File Embedder")
 
     # File upload for DOCX
-    docx_file = st.file_uploader("Upload DOCX file", type=['docx'])
+    docx_file = st.file_uploader("Upload DOCX file (will be converted to PDF)", type=['docx'])
 
-    # Multiple PDF file upload
-    pdf_files = st.file_uploader("Upload PDF files to embed", type=['pdf'], accept_multiple_files=True)
+    # Multiple file upload for embedding
+    files_to_embed = st.file_uploader(
+        "Upload files to embed (These will be embedded as attachments)",
+        type=['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx'],  # Add more file types as needed
+        accept_multiple_files=True
+    )
 
-    if st.button("Convert and Merge") and docx_file is not None:
+    if st.button("Convert and Embed") and docx_file is not None:
         try:
             with st.spinner("Processing..."):
                 # Convert DOCX to PDF
                 temp_pdf = docx_to_pdf(docx_file.read())
 
-                # Create PDF merger object
-                merger = PdfMerger()
+                # Embed files
+                pdf_writer = embed_files(temp_pdf, files_to_embed)
 
-                # Add converted PDF
-                merger.append(temp_pdf)
-
-                # Add selected PDFs
-                for pdf in pdf_files:
-                    merger.append(pdf)
-
-                # Create output PDF in memory
-                output = io.BytesIO()
-                merger.write(output)
-                merger.close()
+                # Save to bytes buffer
+                output_buffer = io.BytesIO()
+                pdf_writer.write(output_buffer)
 
                 # Clean up temporary file
                 os.unlink(temp_pdf)
 
-                # Offer the merged PDF for download
+                # Offer the PDF with embedded files for download
                 st.download_button(
-                    label="Download merged PDF",
-                    data=output.getvalue(),
-                    file_name="merged_document.pdf",
+                    label="Download PDF with embedded files",
+                    data=output_buffer.getvalue(),
+                    file_name="document_with_attachments.pdf",
                     mime="application/pdf"
                 )
 
-                st.success("Files have been converted and merged successfully!")
+                st.success("Files have been converted and embedded successfully!")
+
+                st.info("""
+                Note: The embedded files can be accessed in PDF readers that support attachments:
+                - Adobe Acrobat Reader: View > Show/Hide > Navigation Panes > Attachments
+                - Other PDF readers: Look for a paperclip icon or attachments panel
+                """)
 
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
@@ -81,4 +100,4 @@ if __name__ == "__main__":
 
 # Created/Modified files during execution:
 # - temporary PDF file (automatically deleted after processing)
-# - merged_document.pdf (downloaded by user)
+# - document_with_attachments.pdf (downloaded by user)
