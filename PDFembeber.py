@@ -59,9 +59,6 @@ def merge_pdfs(pdf_files_data, main_pdf_name, debug_logs):
         raise
 
 def process_task(task, debug_logs):
-    """
-    Routes a task dictionary to the correct PDF processing function.
-    """
     debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Processing task: {task['operation']} for {task['main_pdf_name']}")
     try:
         if task['operation'] == "Embed files as attachments":
@@ -75,13 +72,12 @@ def process_task(task, debug_logs):
 # --- Form Callback Function ---
 
 def add_task():
-    """Callback function to process and add a task to the session state."""
     st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Add Task callback triggered")
     
-    main_pdf = st.session_state.main_pdf_input
-    operation = st.session_state.operation_input
-    additional_files = st.session_state.additional_files_input
-    ordered_pdf_names = st.session_state.ordered_pdf_names_input
+    main_pdf = st.session_state.get('main_pdf_input')
+    operation = st.session_state.get('operation_input')
+    additional_files = st.session_state.get('additional_files_input', [])
+    ordered_pdf_names = st.session_state.get('ordered_pdf_names_input', [])
 
     if not main_pdf:
         st.error("Please upload a main PDF file.")
@@ -134,7 +130,7 @@ def main():
 
     st.header("1. Add New Task")
 
-    with st.form(key="pdf_form", clear_on_submit=True):
+    with st.form(key="pdf_form", clear_on_submit=False):  # Changed to not clear form
         main_pdf = st.file_uploader("Upload Main PDF File", type=['pdf'], key="main_pdf_input")
         operation = st.radio(
             "Choose Operation:", ["Embed files as attachments", "Merge PDFs"], horizontal=True, key="operation_input"
@@ -147,7 +143,7 @@ def main():
                 accept_multiple_files=True, key="additional_files_input"
             )
             st.session_state.ordered_pdf_names_input = []
-        else: # "Merge PDFs"
+        else:  # "Merge PDFs"
             additional_files = st.file_uploader(
                 "Upload Additional PDFs to Merge (required)",
                 type=['pdf'], accept_multiple_files=True, key="additional_files_input"
@@ -163,13 +159,14 @@ def main():
             else:
                 st.session_state.ordered_pdf_names_input = []
 
-        st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
+        submit_button = st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
 
+    # Display tasks even if form is submitted
     if st.session_state.tasks:
         st.header("2. Process Task Queue")
-        
-        for i, task in enumerate(st.session_state.tasks):
-            st.write(f"**Task {i+1}:** {task['operation']} on '{task['main_pdf_name']}'")
+        with st.expander("View Tasks", expanded=True):
+            for i, task in enumerate(st.session_state.tasks):
+                st.write(f"**Task {i+1}:** {task['operation']} on '{task['main_pdf_name']}'")
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -184,13 +181,16 @@ def main():
                             st.error(f"Error processing task {i+1}: {e}")
                     st.session_state.processed_results.extend(new_results)
                 st.success("All tasks processed!")
-                st.session_state.tasks = []
+                st.session_state.tasks = []  # Clear tasks after processing
                 st.rerun()
 
         with col2:
             if st.button("❌ Clear All Tasks", use_container_width=True):
                 st.session_state.tasks = []
                 st.session_state.debug_logs = []
+                st.session_state.main_pdf_input = None
+                st.session_state.additional_files_input = []
+                st.session_state.ordered_pdf_names_input = []
                 st.toast("🗑️ All tasks cleared.")
                 st.rerun()
         
@@ -202,17 +202,18 @@ def main():
 
     if st.session_state.processed_results:
         st.header("3. Download Processed Files")
-        for i, res in enumerate(st.session_state.processed_results):
-            st.download_button(
-                label=f"Download '{res['filename']}'",
-                data=res['data'],
-                file_name=res['filename'],
-                mime="application/pdf",
-                key=f"download_processed_{i}"
-            )
+        with st.expander("Download Files", expanded=True):
+            for i, res in enumerate(st.session_state.processed_results):
+                st.download_button(
+                    label=f"Download '{res['filename']}'",
+                    data=res['data'],
+                    file_name=res['filename'],
+                    mime="application/pdf",
+                    key=f"download_processed_{i}"
+                )
     
     st.subheader("Debug Logs")
-    with st.expander("View Debug Logs"):
+    with st.expander("View Debug Logs", expanded=False):
         log_text = "\n".join(reversed(st.session_state.debug_logs))
         st.text_area(
             "Debug Log Output",
