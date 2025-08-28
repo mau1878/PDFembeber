@@ -37,6 +37,8 @@ def embed_files(main_pdf_data, files_to_embed, main_pdf_name, debug_logs):
 def merge_pdfs(pdf_files_data, main_pdf_name, debug_logs):
     debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Starting merge_pdfs for {main_pdf_name}")
     try:
+        if not pdf_files_data:
+            raise ValueError("No PDFs to merge")
         merger = PdfMerger()
         for pdf_data, pdf_name in pdf_files_data:
             pdf_data.seek(0)
@@ -56,7 +58,6 @@ def merge_pdfs(pdf_files_data, main_pdf_name, debug_logs):
         debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in merge_pdfs: {str(e)}")
         raise
 
-# <<< FIX #1: Re-added the missing process_task function >>>
 def process_task(task, debug_logs):
     """
     Routes a task dictionary to the correct PDF processing function.
@@ -86,10 +87,15 @@ def add_task():
         st.error("Please upload a main PDF file.")
         st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No main PDF uploaded")
         return
-    if operation == "Merge PDFs" and not additional_files:
-        st.error("Please upload at least one additional PDF for merging.")
-        st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No additional PDFs for merging")
-        return
+    if operation == "Merge PDFs":
+        if not additional_files:
+            st.error("Please upload at least one additional PDF for merging.")
+            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No additional PDFs for merging")
+            return
+        if not ordered_pdf_names:
+            st.error("Please select at least one PDF for merging.")
+            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No PDFs selected for merging")
+            return
 
     try:
         main_pdf_data = io.BytesIO(main_pdf.read())
@@ -123,6 +129,8 @@ def main():
         st.session_state.tasks = []
     if 'debug_logs' not in st.session_state:
         st.session_state.debug_logs = []
+    if 'processed_results' not in st.session_state:
+        st.session_state.processed_results = []
 
     st.header("1. Add New Task")
 
@@ -162,19 +170,18 @@ def main():
         for i, task in enumerate(st.session_state.tasks):
             st.write(f"**Task {i+1}:** {task['operation']} on '{task['main_pdf_name']}'")
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("✅ Process All Tasks", use_container_width=True, type="primary"):
                 with st.spinner("Processing..."):
+                    new_results = []
                     for i, task in enumerate(st.session_state.tasks):
                         try:
                             output_buffer, output_filename = process_task(task, st.session_state.debug_logs)
-                            st.download_button(
-                                label=f"Download '{output_filename}'", data=output_buffer.getvalue(),
-                                file_name=output_filename, mime="application/pdf", key=f"download_{i}"
-                            )
+                            new_results.append({'data': output_buffer.getvalue(), 'filename': output_filename})
                         except Exception as e:
                             st.error(f"Error processing task {i+1}: {e}")
+                    st.session_state.processed_results.extend(new_results)
                 st.success("All tasks processed!")
 
         with col2:
@@ -183,11 +190,27 @@ def main():
                 st.session_state.debug_logs = []
                 st.toast("🗑️ All tasks cleared.")
                 st.rerun()
+        
+        with col3:
+            if st.button("🗑️ Clear Processed Files", use_container_width=True):
+                st.session_state.processed_results = []
+                st.toast("🗑️ Processed files cleared.")
+                st.rerun()
+
+    if st.session_state.processed_results:
+        st.header("3. Download Processed Files")
+        for i, res in enumerate(st.session_state.processed_results):
+            st.download_button(
+                label=f"Download '{res['filename']}'",
+                data=res['data'],
+                file_name=res['filename'],
+                mime="application/pdf",
+                key=f"download_processed_{i}"
+            )
     
     st.subheader("Debug Logs")
     with st.expander("View Debug Logs"):
         log_text = "\n".join(reversed(st.session_state.debug_logs))
-        # <<< FIX #2: Added a label and hid it visually >>>
         st.text_area(
             "Debug Log Output",
             value=log_text,
