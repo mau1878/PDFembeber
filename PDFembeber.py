@@ -75,9 +75,11 @@ def add_task():
     st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Add Task callback triggered")
     
     main_pdf = st.session_state.get('main_pdf_input')
-    operation = st.session_state.get('operation_input')
+    operation = st.session_state.get('operation_input', 'Embed files as attachments')
     additional_files = st.session_state.get('additional_files_input', [])
     ordered_pdf_names = st.session_state.get('ordered_pdf_names_input', [])
+
+    st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Main PDF: {main_pdf.name if main_pdf else 'None'}, Operation: {operation}, Additional Files: {[f.name for f in additional_files] if additional_files else []}, Ordered PDFs: {ordered_pdf_names}")
 
     if not main_pdf:
         st.error("Please upload a main PDF file.")
@@ -89,7 +91,7 @@ def add_task():
             st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No additional PDFs for merging")
             return
         if not ordered_pdf_names:
-            st.error("Please select at least one PDF for merging.")
+            st.error("Please select at least one PDF for merging in the order selection.")
             st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No PDFs selected for merging")
             return
 
@@ -104,7 +106,11 @@ def add_task():
 
         if operation == "Merge PDFs":
             all_pdfs_map = {name: data for data, name in [(main_pdf_data, main_pdf.name)] + additional_files_data}
-            final_ordered_pdfs = [(all_pdfs_map[name], name) for name in ordered_pdf_names]
+            final_ordered_pdfs = [(all_pdfs_map[name], name) for name in ordered_pdf_names if name in all_pdfs_map]
+            if not final_ordered_pdfs:
+                st.error("No valid PDFs selected for merging. Please ensure the order includes uploaded PDFs.")
+                st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No valid PDFs in merge order")
+                return
             new_task['ordered_pdfs'] = final_ordered_pdfs
             st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Merge order set: {ordered_pdf_names}")
         
@@ -130,14 +136,15 @@ def main():
 
     st.header("1. Add New Task")
 
-    with st.form(key="pdf_form", clear_on_submit=False):  # Changed to not clear form
+    with st.form(key="pdf_form", clear_on_submit=False):
         main_pdf = st.file_uploader("Upload Main PDF File", type=['pdf'], key="main_pdf_input")
         operation = st.radio(
             "Choose Operation:", ["Embed files as attachments", "Merge PDFs"], horizontal=True, key="operation_input"
         )
         
+        additional_files = []
         if operation == "Embed files as attachments":
-            st.file_uploader(
+            additional_files = st.file_uploader(
                 "Upload Files to Embed (optional)",
                 type=['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx'],
                 accept_multiple_files=True, key="additional_files_input"
@@ -151,9 +158,14 @@ def main():
             
             if main_pdf and additional_files:
                 pdf_names = [main_pdf.name] + [f.name for f in additional_files]
+                # Ensure ordered_pdf_names_input persists
+                if 'ordered_pdf_names_input' not in st.session_state or not st.session_state.ordered_pdf_names_input:
+                    st.session_state.ordered_pdf_names_input = pdf_names
                 st.multiselect(
                     "Arrange merge order (click to select/reorder):",
-                    options=pdf_names, default=pdf_names, key="ordered_pdf_names_input",
+                    options=pdf_names,
+                    default=st.session_state.ordered_pdf_names_input,
+                    key="ordered_pdf_names_input",
                     help="Arrange the order by reordering the selections. You must select at least one."
                 )
             else:
@@ -161,7 +173,6 @@ def main():
 
         submit_button = st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
 
-    # Display tasks even if form is submitted
     if st.session_state.tasks:
         st.header("2. Process Task Queue")
         with st.expander("View Tasks", expanded=True):
@@ -176,12 +187,13 @@ def main():
                     for i, task in enumerate(st.session_state.tasks):
                         try:
                             output_buffer, output_filename = process_task(task, st.session_state.debug_logs)
+                            output_buffer.seek(0)  # Ensure buffer is reset for download
                             new_results.append({'data': output_buffer.getvalue(), 'filename': output_filename})
                         except Exception as e:
                             st.error(f"Error processing task {i+1}: {e}")
                     st.session_state.processed_results.extend(new_results)
                 st.success("All tasks processed!")
-                st.session_state.tasks = []  # Clear tasks after processing
+                st.session_state.tasks = []
                 st.rerun()
 
         with col2:
