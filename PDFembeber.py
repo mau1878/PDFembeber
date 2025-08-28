@@ -202,7 +202,7 @@ def main():
                     st.error(f"Error in merge order selection: {e}")
                     st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in multiselect: {e}")
                     ordered_pdfs = pdf_names
-                st.session_state.ordered_pdf_names_input = ordered_pdfs
+                    st.session_state.ordered_pdf_names_input = ordered_pdfs
             else:
                 if 'ordered_pdf_names_input' in st.session_state:
                     del st.session_state.ordered_pdf_names_input
