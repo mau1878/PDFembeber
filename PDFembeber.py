@@ -115,10 +115,13 @@ def add_task():
         st.toast(f"✅ Task '{main_pdf.name}' added to queue!")
         st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Task added, total tasks: {len(st.session_state.tasks)}")
         
-        # Reset form inputs
-        st.session_state.main_pdf_input = None
-        st.session_state.additional_files_input = []
-        st.session_state.ordered_pdf_names_input = []
+        # Clear form inputs without modifying widget states
+        if 'main_pdf_input' in st.session_state:
+            del st.session_state.main_pdf_input
+        if 'additional_files_input' in st.session_state:
+            del st.session_state.additional_files_input
+        if 'ordered_pdf_names_input' in st.session_state:
+            del st.session_state.ordered_pdf_names_input
         
     except Exception as e:
         st.error(f"Failed to add task: {e}")
@@ -167,7 +170,7 @@ def main():
                 st.error(f"Error in additional files uploader: {e}")
                 st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in additional files uploader: {e}")
             if 'ordered_pdf_names_input' in st.session_state:
-                st.session_state.ordered_pdf_names_input = []
+                del st.session_state.ordered_pdf_names_input
         else:  # "Merge PDFs"
             try:
                 additional_files = st.file_uploader(
@@ -180,10 +183,10 @@ def main():
 
             if main_pdf and additional_files:
                 pdf_names = [main_pdf.name] + [f.name for f in additional_files]
-                # Initialize ordered_pdf_names_input
-                if 'ordered_pdf_names_input' not in st.session_state or not st.session_state.ordered_pdf_names_input:
-                    st.session_state.ordered_pdf_names_input = pdf_names
                 try:
+                    # Initialize ordered_pdf_names_input
+                    if 'ordered_pdf_names_input' not in st.session_state:
+                        st.session_state.ordered_pdf_names_input = pdf_names
                     ordered_pdfs = st.multiselect(
                         "Arrange merge order (click to select/reorder):",
                         options=pdf_names,
@@ -199,7 +202,7 @@ def main():
                     st.session_state.ordered_pdf_names_input = pdf_names
             else:
                 if 'ordered_pdf_names_input' in st.session_state:
-                    st.session_state.ordered_pdf_names_input = []
+                    del st.session_state.ordered_pdf_names_input
 
         try:
             st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
@@ -234,9 +237,12 @@ def main():
             if st.button("❌ Clear All Tasks", use_container_width=True):
                 st.session_state.tasks = []
                 st.session_state.debug_logs = []
-                st.session_state.main_pdf_input = None
-                st.session_state.additional_files_input = []
-                st.session_state.ordered_pdf_names_input = []
+                if 'main_pdf_input' in st.session_state:
+                    del st.session_state.main_pdf_input
+                if 'additional_files_input' in st.session_state:
+                    del st.session_state.additional_files_input
+                if 'ordered_pdf_names_input' in st.session_state:
+                    del st.session_state.ordered_pdf_names_input
                 st.toast("🗑️ All tasks cleared.")
                 st.rerun()
         
