@@ -118,6 +118,11 @@ def add_task():
         st.toast(f"✅ Task '{main_pdf.name}' added to queue!")
         st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Task added, total tasks: {len(st.session_state.tasks)}")
         
+        # Reset form inputs after successful task addition
+        st.session_state.main_pdf_input = None
+        st.session_state.additional_files_input = []
+        st.session_state.ordered_pdf_names_input = []
+        
     except Exception as e:
         st.error(f"Failed to add task: {e}")
         st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error adding task: {e}")
@@ -158,20 +163,25 @@ def main():
             
             if main_pdf and additional_files:
                 pdf_names = [main_pdf.name] + [f.name for f in additional_files]
-                # Ensure ordered_pdf_names_input persists
-                if 'ordered_pdf_names_input' not in st.session_state or not st.session_state.ordered_pdf_names_input:
+                # Initialize ordered_pdf_names_input only if empty or invalid
+                if 'ordered_pdf_names_input' not in st.session_state or not all(name in pdf_names for name in st.session_state.ordered_pdf_names_input):
                     st.session_state.ordered_pdf_names_input = pdf_names
-                st.multiselect(
-                    "Arrange merge order (click to select/reorder):",
-                    options=pdf_names,
-                    default=st.session_state.ordered_pdf_names_input,
-                    key="ordered_pdf_names_input",
-                    help="Arrange the order by reordering the selections. You must select at least one."
-                )
+                try:
+                    st.multiselect(
+                        "Arrange merge order (click to select/reorder):",
+                        options=pdf_names,
+                        default=[name for name in st.session_state.ordered_pdf_names_input if name in pdf_names],
+                        key="ordered_pdf_names_input",
+                        help="Arrange the order by reordering the selections. You must select at least one."
+                    )
+                except Exception as e:
+                    st.error(f"Error in merge order selection: {e}")
+                    st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in multiselect: {e}")
+                    st.session_state.ordered_pdf_names_input = pdf_names
             else:
                 st.session_state.ordered_pdf_names_input = []
 
-        submit_button = st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
+        st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
 
     if st.session_state.tasks:
         st.header("2. Process Task Queue")
@@ -187,7 +197,7 @@ def main():
                     for i, task in enumerate(st.session_state.tasks):
                         try:
                             output_buffer, output_filename = process_task(task, st.session_state.debug_logs)
-                            output_buffer.seek(0)  # Ensure buffer is reset for download
+                            output_buffer.seek(0)
                             new_results.append({'data': output_buffer.getvalue(), 'filename': output_filename})
                         except Exception as e:
                             st.error(f"Error processing task {i+1}: {e}")
