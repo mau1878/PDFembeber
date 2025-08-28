@@ -4,25 +4,19 @@ import io
 import os
 
 def embed_files(main_pdf, files_to_embed, main_pdf_name):
-    # Create PDF writer object
     pdf_writer = PdfWriter()
-
-    # Add the main PDF pages
     pdf_reader = PdfReader(main_pdf)
     for page in pdf_reader.pages:
         pdf_writer.add_page(page)
-
-    # Embed each file as an attachment
+    
     for file in files_to_embed:
         file_data = file.read()
         filename = file.name
         pdf_writer.add_attachment(filename, file_data)
-
-    # Create output filename with _EMBEDDED suffix
+    
     base_name = os.path.splitext(main_pdf_name)[0]
     output_filename = f"{base_name}_EMBEDDED.pdf"
     
-    # Save to bytes buffer
     output_buffer = io.BytesIO()
     pdf_writer.write(output_buffer)
     
@@ -30,70 +24,75 @@ def embed_files(main_pdf, files_to_embed, main_pdf_name):
 
 def merge_pdfs(pdf_files, order, main_pdf_name):
     merger = PdfMerger()
-
-    # Add PDFs in the specified order
     for idx in order:
-        pdf_files[idx].seek(0)  # Reset file pointer
+        pdf_files[idx].seek(0)
         merger.append(pdf_files[idx])
-
-    # Create output filename with _MERGED suffix
+    
     base_name = os.path.splitext(main_pdf_name)[0]
     output_filename = f"{base_name}_MERGED.pdf"
     
     output_buffer = io.BytesIO()
     merger.write(output_buffer)
     merger.close()
-
+    
     return output_buffer, output_filename
 
-def process_task(main_pdf, additional_files, operation, order=None):
-    if operation == "Embed files as attachments":
-        output_buffer, output_filename = embed_files(main_pdf, additional_files, main_pdf.name)
-        return output_buffer, output_filename
-    else:  # Merge PDFs
-        all_pdfs = [main_pdf] + additional_files
-        output_buffer, output_filename = merge_pdfs(all_pdfs, order, main_pdf.name)
-        return output_buffer, output_filename
+def process_task(task):
+    if task['operation'] == "Embed files as attachments":
+        return embed_files(task['main_pdf'], task['additional_files'], task['main_pdf_name'])
+    else:
+        all_pdfs = [task['main_pdf']] + task['additional_files']
+        return merge_pdfs(all_pdfs, task['order'], task['main_pdf_name'])
 
 def main():
     st.title("PDF File Manager")
-
-    # Initialize session state for tasks
+    
+    # Initialize session state
     if 'tasks' not in st.session_state:
         st.session_state.tasks = []
+    if 'form_key' not in st.session_state:
+        st.session_state.form_key = 0
+    if 'pdf_order' not in st.session_state:
+        st.session_state.pdf_order = {}
 
-    # File upload section
-    with st.form("pdf_form"):
-        main_pdf = st.file_uploader("Upload main PDF file", type=['pdf'], key="main_pdf")
+    # Form for adding tasks
+    with st.form(key=f"pdf_form_{st.session_state.form_key}"):
+        main_pdf = st.file_uploader("Upload main PDF file", type=['pdf'], key=f"main_pdf_{st.session_state.form_key}")
         
         operation = st.radio(
             "Choose operation:",
             ["Embed files as attachments", "Merge PDFs"],
-            key="operation"
+            key=f"operation_{st.session_state.form_key}"
         )
-
+        
+        additional_files = []
+        order = None
+        
         if operation == "Embed files as attachments":
             additional_files = st.file_uploader(
-                "Upload files to embed (These will be attached)",
+                "Upload files to embed",
                 type=['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx'],
                 accept_multiple_files=True,
-                key="embed_files"
+                key=f"embed_files_{st.session_state.form_key}"
             )
         else:
             additional_files = st.file_uploader(
                 "Upload PDFs to merge",
                 type=['pdf'],
                 accept_multiple_files=True,
-                key="merge_files"
+                key=f"merge_files_{st.session_state.form_key}"
             )
-
-            if additional_files:
-                # Create ordering interface
-                all_pdfs = [main_pdf] + additional_files if main_pdf else additional_files
-                pdf_names = [main_pdf.name] + [pdf.name for pdf in additional_files] if main_pdf else [pdf.name for pdf in additional_files]
+            
+            if additional_files and main_pdf:
+                all_pdfs = [main_pdf] + additional_files
+                pdf_names = [main_pdf.name] + [pdf.name for pdf in additional_files]
                 
                 st.write("Arrange the order of PDFs (drag to reorder):")
-                order = st.session_state.get('pdf_order', list(range(len(all_pdfs))))
+                form_key = st.session_state.form_key
+                if form_key not in st.session_state.pdf_order:
+                    st.session_state.pdf_order[form_key] = list(range(len(all_pdfs)))
+                
+                order = st.session_state.pdf_order[form_key]
                 
                 cols = st.columns(len(all_pdfs))
                 for i, col in enumerate(cols):
@@ -102,63 +101,74 @@ def main():
                             pdf_names[i],
                             min_value=1,
                             max_value=len(all_pdfs),
-                            value=order[i]+1,
-                            key=f"pdf_{i}"
+                            value=order[i] + 1,
+                            key=f"pdf_{form_key}_{i}"
                         ) - 1
                         order[i] = new_pos
                 
-                # Sort the order to handle duplicate positions
-                final_order = sorted(range(len(order)), key=lambda k: order[k])
-            else:
-                final_order = [0]
-
+                order = sorted(range(len(order)), key=lambda k: order[k])
+        
         submit = st.form_submit_button("Add Task")
-
+        
         if submit and main_pdf and additional_files:
+            # Store file contents in session state to persist across reruns
+            main_pdf_data = io.BytesIO(main_pdf.read())
+            additional_files_data = [io.BytesIO(file.read()) for file in additional_files]
+            
             st.session_state.tasks.append({
-                'main_pdf': main_pdf,
-                'additional_files': additional_files,
+                'main_pdf': main_pdf_data,
+                'main_pdf_name': main_pdf.name,
+                'additional_files': additional_files_data,
                 'operation': operation,
-                'order': final_order if operation == "Merge PDFs" else None
+                'order': order if operation == "Merge PDFs" else None
             })
+            st.session_state.form_key += 1  # Increment form key to reset form
+            st.session_state.pdf_order = {}  # Clear order for new form
             st.success("Task added successfully!")
+            st.rerun()  # Force rerun to update form
 
-    # Process all tasks
-    if st.button("Process All Tasks") and st.session_state.tasks:
-        with st.spinner("Processing all tasks..."):
-            for i, task in enumerate(st.session_state.tasks):
-                try:
-                    output_buffer, output_filename = process_task(
-                        task['main_pdf'],
-                        task['additional_files'],
-                        task['operation'],
-                        task['order']
-                    )
-
-                    st.download_button(
-                        label=f"Download {output_filename}",
-                        data=output_buffer.getvalue(),
-                        file_name=output_filename,
-                        mime="application/pdf",
-                        key=f"download_{i}"
-                    )
-
-                    if task['operation'] == "Embed files as attachments":
-                        st.info("""
-                        Note: The embedded files can be accessed in PDF readers that support attachments:
-                        - Adobe Acrobat Reader: View > Show/Hide > Navigation Panes > Attachments
-                        - Other PDF readers: Look for a paperclip icon or attachments panel
-                        """)
-
-                    st.success(f"Task {i+1} processed successfully!")
-
-                except Exception as e:
-                    st.error(f"Error in task {i+1}: {str(e)}")
-
-    # Clear tasks button
-    if st.button("Clear All Tasks"):
-        st.session_state.tasks = []
-        st.success("All tasks cleared!")
+    # Display current tasks
+    if st.session_state.tasks:
+        st.write("### Added Tasks")
+        for i, task in enumerate(st.session_state.tasks):
+            op = task['operation']
+            pdf_name = task['main_pdf_name']
+            st.write(f"Task {i+1}: {op} - Main PDF: {pdf_name}")
+        
+        # Process all tasks
+        if st.button("Process All Tasks"):
+            with st.spinner("Processing all tasks..."):
+                for i, task in enumerate(st.session_state.tasks):
+                    try:
+                        output_buffer, output_filename = process_task(task)
+                        
+                        st.download_button(
+                            label=f"Download {output_filename}",
+                            data=output_buffer.getvalue(),
+                            file_name=output_filename,
+                            mime="application/pdf",
+                            key=f"download_{i}"
+                        )
+                        
+                        if task['operation'] == "Embed files as attachments":
+                            st.info("""
+                            Note: Embedded files can be accessed in PDF readers that support attachments:
+                            - Adobe Acrobat Reader: View > Show/Hide > Navigation Panes > Attachments
+                            - Other PDF readers: Look for a paperclip icon or attachments panel
+                            """)
+                        
+                        st.success(f"Task {i+1} processed successfully!")
+                    
+                    except Exception as e:
+                        st.error(f"Error in task {i+1}: {str(e)}")
+        
+        # Clear tasks
+        if st.button("Clear All Tasks"):
+            st.session_state.tasks = []
+            st.session_state.form_key = 0
+            st.session_state.pdf_order = {}
+            st.success("All tasks cleared!")
+            st.rerun()
 
 if __name__ == "__main__":
     main()
