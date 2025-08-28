@@ -91,7 +91,7 @@ def add_task():
             st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No additional PDFs for merging")
             return
         if not ordered_pdf_names:
-            # Fallback to default order if multiselect fails
+            # Fallback to default order
             pdf_names = [main_pdf.name] + [f.name for f in additional_files]
             st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] No PDFs selected, using default order: {pdf_names}")
             ordered_pdf_names = pdf_names
@@ -115,7 +115,7 @@ def add_task():
         st.toast(f"✅ Task '{main_pdf.name}' added to queue!")
         st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Task added, total tasks: {len(st.session_state.tasks)}")
         
-        # Reset form inputs after successful task addition
+        # Reset form inputs
         st.session_state.main_pdf_input = None
         st.session_state.additional_files_input = []
         st.session_state.ordered_pdf_names_input = []
@@ -139,29 +139,48 @@ def main():
     st.header("1. Add New Task")
 
     with st.form(key="pdf_form", clear_on_submit=False):
-        main_pdf = st.file_uploader("Upload Main PDF File", type=['pdf'], key="main_pdf_input")
-        operation = st.radio(
-            "Choose Operation:", ["Embed files as attachments", "Merge PDFs"], horizontal=True, key="operation_input"
-        )
-        
+        try:
+            main_pdf = st.file_uploader("Upload Main PDF File", type=['pdf'], key="main_pdf_input")
+        except Exception as e:
+            st.error(f"Error in main PDF uploader: {e}")
+            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in main PDF uploader: {e}")
+            main_pdf = None
+
+        try:
+            operation = st.radio(
+                "Choose Operation:", ["Embed files as attachments", "Merge PDFs"], horizontal=True, key="operation_input"
+            )
+        except Exception as e:
+            st.error(f"Error in operation radio: {e}")
+            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in operation radio: {e}")
+            operation = "Embed files as attachments"
+
         additional_files = []
         if operation == "Embed files as attachments":
-            additional_files = st.file_uploader(
-                "Upload Files to Embed (optional)",
-                type=['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx'],
-                accept_multiple_files=True, key="additional_files_input"
-            )
+            try:
+                additional_files = st.file_uploader(
+                    "Upload Files to Embed (optional)",
+                    type=['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx'],
+                    accept_multiple_files=True, key="additional_files_input"
+                )
+            except Exception as e:
+                st.error(f"Error in additional files uploader: {e}")
+                st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in additional files uploader: {e}")
             if 'ordered_pdf_names_input' in st.session_state:
                 st.session_state.ordered_pdf_names_input = []
         else:  # "Merge PDFs"
-            additional_files = st.file_uploader(
-                "Upload Additional PDFs to Merge (required)",
-                type=['pdf'], accept_multiple_files=True, key="additional_files_input"
-            )
-            
+            try:
+                additional_files = st.file_uploader(
+                    "Upload Additional PDFs to Merge (required)",
+                    type=['pdf'], accept_multiple_files=True, key="additional_files_input"
+                )
+            except Exception as e:
+                st.error(f"Error in additional PDFs uploader: {e}")
+                st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in additional PDFs uploader: {e}")
+
             if main_pdf and additional_files:
                 pdf_names = [main_pdf.name] + [f.name for f in additional_files]
-                # Force initialize ordered_pdf_names_input
+                # Initialize ordered_pdf_names_input
                 if 'ordered_pdf_names_input' not in st.session_state or not st.session_state.ordered_pdf_names_input:
                     st.session_state.ordered_pdf_names_input = pdf_names
                 try:
@@ -182,7 +201,11 @@ def main():
                 if 'ordered_pdf_names_input' in st.session_state:
                     st.session_state.ordered_pdf_names_input = []
 
-        st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
+        try:
+            st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
+        except Exception as e:
+            st.error(f"Error in form submit button: {e}")
+            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in form submit button: {e}")
 
     if st.session_state.tasks:
         st.header("2. Process Task Queue")
