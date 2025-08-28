@@ -157,7 +157,8 @@ def main():
                 pdf_names = [main_pdf.name] + [f.name for f in additional_files]
                 st.multiselect(
                     "Arrange merge order (click to select/reorder):",
-                    options=pdf_names, default=pdf_names, key="ordered_pdf_names_input"
+                    options=pdf_names, default=pdf_names, key="ordered_pdf_names_input",
+                    help="Arrange the order by reordering the selections. You must select at least one."
                 )
             else:
                 st.session_state.ordered_pdf_names_input = []
@@ -183,6 +184,8 @@ def main():
                             st.error(f"Error processing task {i+1}: {e}")
                     st.session_state.processed_results.extend(new_results)
                 st.success("All tasks processed!")
+                st.session_state.tasks = []
+                st.rerun()
 
         with col2:
             if st.button("❌ Clear All Tasks", use_container_width=True):
