@@ -115,7 +115,7 @@ def add_task():
         st.toast(f"✅ Task '{main_pdf.name}' added to queue!")
         st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Task added, total tasks: {len(st.session_state.tasks)}")
         
-        # Clear form inputs without modifying widget states
+        # Clear form inputs
         if 'main_pdf_input' in st.session_state:
             del st.session_state.main_pdf_input
         if 'additional_files_input' in st.session_state:
@@ -138,6 +138,8 @@ def main():
         st.session_state.debug_logs = []
     if 'processed_results' not in st.session_state:
         st.session_state.processed_results = []
+    if 'default_ordered_pdfs' not in st.session_state:
+        st.session_state.default_ordered_pdfs = []
 
     st.header("1. Add New Task")
 
@@ -171,6 +173,7 @@ def main():
                 st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in additional files uploader: {e}")
             if 'ordered_pdf_names_input' in st.session_state:
                 del st.session_state.ordered_pdf_names_input
+            st.session_state.default_ordered_pdfs = []
         else:  # "Merge PDFs"
             try:
                 additional_files = st.file_uploader(
@@ -183,14 +186,13 @@ def main():
 
             if main_pdf and additional_files:
                 pdf_names = [main_pdf.name] + [f.name for f in additional_files]
+                # Set default order in a separate session state key
+                st.session_state.default_ordered_pdfs = pdf_names
                 try:
-                    # Initialize ordered_pdf_names_input
-                    if 'ordered_pdf_names_input' not in st.session_state:
-                        st.session_state.ordered_pdf_names_input = pdf_names
                     ordered_pdfs = st.multiselect(
                         "Arrange merge order (click to select/reorder):",
                         options=pdf_names,
-                        default=st.session_state.ordered_pdf_names_input,
+                        default=st.session_state.default_ordered_pdfs,
                         key="ordered_pdf_names_input",
                         help="Select and arrange PDFs in the desired merge order. Defaults to all uploaded PDFs."
                     )
@@ -203,6 +205,7 @@ def main():
             else:
                 if 'ordered_pdf_names_input' in st.session_state:
                     del st.session_state.ordered_pdf_names_input
+                st.session_state.default_ordered_pdfs = []
 
         try:
             st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
@@ -231,6 +234,12 @@ def main():
                     st.session_state.processed_results.extend(new_results)
                 st.success("All tasks processed!")
                 st.session_state.tasks = []
+                if 'main_pdf_input' in st.session_state:
+                    del st.session_state.main_pdf_input
+                if 'additional_files_input' in st.session_state:
+                    del st.session_state.additional_files_input
+                if 'ordered_pdf_names_input' in st.session_state:
+                    del st.session_state.ordered_pdf_names_input
                 st.rerun()
 
         with col2:
@@ -243,37 +252,9 @@ def main():
                     del st.session_state.additional_files_input
                 if 'ordered_pdf_names_input' in st.session_state:
                     del st.session_state.ordered_pdf_names_input
+                st.session_state.default_ordered_pdfs = []
                 st.toast("🗑️ All tasks cleared.")
                 st.rerun()
         
         with col3:
-            if st.button("🗑️ Clear Processed Files", use_container_width=True):
-                st.session_state.processed_results = []
-                st.toast("🗑️ Processed files cleared.")
-                st.rerun()
-
-    if st.session_state.processed_results:
-        st.header("3. Download Processed Files")
-        with st.expander("Download Files", expanded=True):
-            for i, res in enumerate(st.session_state.processed_results):
-                st.download_button(
-                    label=f"Download '{res['filename']}'",
-                    data=res['data'],
-                    file_name=res['filename'],
-                    mime="application/pdf",
-                    key=f"download_processed_{i}"
-                )
-    
-    st.subheader("Debug Logs")
-    with st.expander("View Debug Logs", expanded=False):
-        log_text = "\n".join(reversed(st.session_state.debug_logs))
-        st.text_area(
-            "Debug Log Output",
-            value=log_text,
-            height=200,
-            key="debug_log_area",
-            label_visibility="collapsed"
-        )
-
-if __name__ == "__main__":
-    main()
+            if st.button("🗑️ Clear
