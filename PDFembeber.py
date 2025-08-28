@@ -9,20 +9,31 @@ def embed_files(main_pdf_data, files_to_embed, main_pdf_name, debug_logs):
     debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Starting embed_files for {main_pdf_name}")
     try:
         pdf_writer = PdfWriter()
-        main_pdf_data.seek(0)
+        
+        # <<< FIX: Reset the main PDF's stream to the beginning before reading.
+        main_pdf_data.seek(0) 
+        
         pdf_reader = PdfReader(main_pdf_data)
         debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Read {len(pdf_reader.pages)} pages from main PDF")
+        
         for page in pdf_reader.pages:
             pdf_writer.add_page(page)
+            
         for file_data, file_name in files_to_embed:
             debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Embedding file: {file_name}")
-            file_data.seek(0)
+            
+            # <<< FIX: Reset each attachment's stream to the beginning.
+            file_data.seek(0) 
+            
             pdf_writer.add_attachment(file_name, file_data.read())
+            
         base_name = os.path.splitext(main_pdf_name)[0]
         output_filename = f"{base_name}_EMBEDDED.pdf"
+        
         output_buffer = io.BytesIO()
         pdf_writer.write(output_buffer)
         debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Embedded files, output file: {output_filename}")
+        
         return output_buffer, output_filename
     except Exception as e:
         debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in embed_files: {str(e)}")
@@ -33,29 +44,24 @@ def merge_pdfs(pdf_files_data, main_pdf_name, debug_logs):
     try:
         merger = PdfMerger()
         for pdf_data, pdf_name in pdf_files_data:
+        
+            # <<< FIX: Reset each PDF's stream to the beginning before merging.
             pdf_data.seek(0)
+            
             debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Merging file: {pdf_name}")
             merger.append(pdf_data)
+            
         base_name = os.path.splitext(main_pdf_name)[0]
         output_filename = f"{base_name}_MERGED.pdf"
+        
         output_buffer = io.BytesIO()
         merger.write(output_buffer)
         merger.close()
         debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Merged PDFs, output file: {output_filename}")
+        
         return output_buffer, output_filename
     except Exception as e:
         debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in merge_pdfs: {str(e)}")
-        raise
-
-def process_task(task, debug_logs):
-    debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Processing task: {task['operation']} for {task['main_pdf_name']}")
-    try:
-        if task['operation'] == "Embed files as attachments":
-            return embed_files(task['main_pdf_data'], task['additional_files'], task['main_pdf_name'], debug_logs)
-        else: # "Merge PDFs"
-            return merge_pdfs(task['ordered_pdfs'], task['main_pdf_name'], debug_logs)
-    except Exception as e:
-        debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error processing task: {str(e)}")
         raise
 
 def add_task():
