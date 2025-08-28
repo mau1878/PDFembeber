@@ -122,6 +122,8 @@ def add_task():
             del st.session_state.additional_files_input
         if 'ordered_pdf_names_input' in st.session_state:
             del st.session_state.ordered_pdf_names_input
+        if 'default_ordered_pdfs' in st.session_state:
+            del st.session_state.default_ordered_pdfs
         
     except Exception as e:
         st.error(f"Failed to add task: {e}")
@@ -186,7 +188,6 @@ def main():
 
             if main_pdf and additional_files:
                 pdf_names = [main_pdf.name] + [f.name for f in additional_files]
-                # Set default order in a separate session state key
                 st.session_state.default_ordered_pdfs = pdf_names
                 try:
                     ordered_pdfs = st.multiselect(
@@ -197,11 +198,11 @@ def main():
                         help="Select and arrange PDFs in the desired merge order. Defaults to all uploaded PDFs."
                     )
                     st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Multiselect updated: {ordered_pdfs}")
-                    st.session_state.ordered_pdf_names_input = ordered_pdfs
                 except Exception as e:
                     st.error(f"Error in merge order selection: {e}")
                     st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in multiselect: {e}")
-                    st.session_state.ordered_pdf_names_input = pdf_names
+                    ordered_pdfs = pdf_names
+                st.session_state.ordered_pdf_names_input = ordered_pdfs
             else:
                 if 'ordered_pdf_names_input' in st.session_state:
                     del st.session_state.ordered_pdf_names_input
@@ -240,6 +241,8 @@ def main():
                     del st.session_state.additional_files_input
                 if 'ordered_pdf_names_input' in st.session_state:
                     del st.session_state.ordered_pdf_names_input
+                if 'default_ordered_pdfs' in st.session_state:
+                    del st.session_state.default_ordered_pdfs
                 st.rerun()
 
         with col2:
@@ -252,9 +255,39 @@ def main():
                     del st.session_state.additional_files_input
                 if 'ordered_pdf_names_input' in st.session_state:
                     del st.session_state.ordered_pdf_names_input
-                st.session_state.default_ordered_pdfs = []
+                if 'default_ordered_pdfs' in st.session_state:
+                    del st.session_state.default_ordered_pdfs
                 st.toast("🗑️ All tasks cleared.")
                 st.rerun()
         
         with col3:
-            if st.button("🗑️ Clear
+            if st.button("🗑️ Clear Processed Files", use_container_width=True):
+                st.session_state.processed_results = []
+                st.toast("🗑️ Processed files cleared.")
+                st.rerun()
+
+    if st.session_state.processed_results:
+        st.header("3. Download Processed Files")
+        with st.expander("Download Files", expanded=True):
+            for i, res in enumerate(st.session_state.processed_results):
+                st.download_button(
+                    label=f"Download '{res['filename']}'",
+                    data=res['data'],
+                    file_name=res['filename'],
+                    mime="application/pdf",
+                    key=f"download_processed_{i}"
+                )
+    
+    st.subheader("Debug Logs")
+    with st.expander("View Debug Logs", expanded=False):
+        log_text = "\n".join(reversed(st.session_state.debug_logs))
+        st.text_area(
+            "Debug Log Output",
+            value=log_text,
+            height=200,
+            key="debug_log_area",
+            label_visibility="collapsed"
+        )
+
+if __name__ == "__main__":
+    main()
