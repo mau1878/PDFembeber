@@ -91,9 +91,10 @@ def add_task():
             st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No additional PDFs for merging")
             return
         if not ordered_pdf_names:
-            st.error("Please select at least one PDF for merging in the order selection.")
-            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No PDFs selected for merging")
-            return
+            # Fallback to default order if multiselect fails
+            pdf_names = [main_pdf.name] + [f.name for f in additional_files]
+            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] No PDFs selected, using default order: {pdf_names}")
+            ordered_pdf_names = pdf_names
 
     try:
         main_pdf_data = io.BytesIO(main_pdf.read())
@@ -107,10 +108,6 @@ def add_task():
         if operation == "Merge PDFs":
             all_pdfs_map = {name: data for data, name in [(main_pdf_data, main_pdf.name)] + additional_files_data}
             final_ordered_pdfs = [(all_pdfs_map[name], name) for name in ordered_pdf_names if name in all_pdfs_map]
-            if not final_ordered_pdfs:
-                st.error("No valid PDFs selected for merging. Please ensure the order includes uploaded PDFs.")
-                st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No valid PDFs in merge order")
-                return
             new_task['ordered_pdfs'] = final_ordered_pdfs
             st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Merge order set: {ordered_pdf_names}")
         
@@ -164,8 +161,8 @@ def main():
             
             if main_pdf and additional_files:
                 pdf_names = [main_pdf.name] + [f.name for f in additional_files]
-                # Initialize ordered_pdf_names_input if empty or invalid
-                if 'ordered_pdf_names_input' not in st.session_state or not st.session_state.ordered_pdf_names_input or not all(name in pdf_names for name in st.session_state.ordered_pdf_names_input):
+                # Force initialize ordered_pdf_names_input
+                if 'ordered_pdf_names_input' not in st.session_state or not st.session_state.ordered_pdf_names_input:
                     st.session_state.ordered_pdf_names_input = pdf_names
                 try:
                     ordered_pdfs = st.multiselect(
@@ -173,9 +170,10 @@ def main():
                         options=pdf_names,
                         default=st.session_state.ordered_pdf_names_input,
                         key="ordered_pdf_names_input",
-                        help="Select and arrange PDFs in the desired merge order. You must select at least one."
+                        help="Select and arrange PDFs in the desired merge order. Defaults to all uploaded PDFs."
                     )
                     st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Multiselect updated: {ordered_pdfs}")
+                    st.session_state.ordered_pdf_names_input = ordered_pdfs
                 except Exception as e:
                     st.error(f"Error in merge order selection: {e}")
                     st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in multiselect: {e}")
