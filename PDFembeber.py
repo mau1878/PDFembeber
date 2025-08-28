@@ -132,11 +132,10 @@ def main():
                 debug_logs.append(f"[{time.strftime('%H:%M:%S')}] PDFs for merge: {[name for name in pdf_names]}")
                 
                 st.write("Arrange PDF order (1 = first):")
-                form_key = st.session_state.form_key
-                if form_key not in st.session_state.pdf_order:
-                    st.session_state.pdf_order[form_key] = list(range(len(all_pdfs)))
+                if st.session_state.form_key not in st.session_state.pdf_order:
+                    st.session_state.pdf_order[st.session_state.form_key] = list(range(len(all_pdfs)))
                 
-                order = st.session_state.pdf_order[form_key]
+                order = st.session_state.pdf_order[st.session_state.form_key]
                 
                 cols = st.columns(len(all_pdfs))
                 for i, col in enumerate(cols):
@@ -146,7 +145,7 @@ def main():
                             min_value=1,
                             max_value=len(all_pdfs),
                             value=order[i] + 1,
-                            key=f"pdf_{form_key}_{i}"
+                            key=f"pdf_{st.session_state.form_key}_{i}"
                         ) - 1
                         order[i] = new_pos
                 
@@ -179,7 +178,7 @@ def main():
                     debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Task added, total tasks: {len(st.session_state.tasks)}")
                     
                     st.session_state.form_key += 1
-                    st.session_state.pdf_order.pop(form_key, None)
+                    st.session_state.pdf_order.pop(st.session_state.form_key - 1, None)
                     st.success("Task added successfully! Form will reset.")
                     debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Form key incremented to {st.session_state.form_key}")
                 except Exception as e:
@@ -206,7 +205,7 @@ def main():
                     if task['operation'] == "Embed files as attachments":
                         st.info("""
                         Embedded files can be accessed in PDF readers that support attachments:
-                        - Adobe Acrobat Reader: View > Show/Hide = Navigation Panes = Attachments
+                        - Adobe Acrobat Reader: View > Show/Hide > Navigation Panes > Attachments
                         - Other PDF readers: Look for a paperclip icon or attachments panel
                         """)
                     
