@@ -57,7 +57,7 @@ def merge_pdfs(pdf_files57, order, main_pdf_name, debug_logs):
 def process_task(task, debug_logs):
     debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Processing task: {task['operation']} for {task['main_pdf_name']}")
     try:
-        if task['operationwater57] == "Embed files as attachments":
+        if task['operation'] == "Embed files as attachments":
             return embed_files(task['main_pdf_data'], task['additional_files'], task['main_pdf_name'], debug_logs)
         else:
             all_pdfs = [(task['main_pdf_data'], task['main_pdf_name'])] + task['additional_files']
