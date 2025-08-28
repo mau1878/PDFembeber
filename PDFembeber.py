@@ -154,7 +154,8 @@ def main():
                 type=['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx'],
                 accept_multiple_files=True, key="additional_files_input"
             )
-            st.session_state.ordered_pdf_names_input = []
+            if 'ordered_pdf_names_input' in st.session_state:
+                st.session_state.ordered_pdf_names_input = []
         else:  # "Merge PDFs"
             additional_files = st.file_uploader(
                 "Upload Additional PDFs to Merge (required)",
@@ -163,23 +164,25 @@ def main():
             
             if main_pdf and additional_files:
                 pdf_names = [main_pdf.name] + [f.name for f in additional_files]
-                # Initialize ordered_pdf_names_input only if empty or invalid
-                if 'ordered_pdf_names_input' not in st.session_state or not all(name in pdf_names for name in st.session_state.ordered_pdf_names_input):
+                # Initialize ordered_pdf_names_input if empty or invalid
+                if 'ordered_pdf_names_input' not in st.session_state or not st.session_state.ordered_pdf_names_input or not all(name in pdf_names for name in st.session_state.ordered_pdf_names_input):
                     st.session_state.ordered_pdf_names_input = pdf_names
                 try:
-                    st.multiselect(
+                    ordered_pdfs = st.multiselect(
                         "Arrange merge order (click to select/reorder):",
                         options=pdf_names,
-                        default=[name for name in st.session_state.ordered_pdf_names_input if name in pdf_names],
+                        default=st.session_state.ordered_pdf_names_input,
                         key="ordered_pdf_names_input",
-                        help="Arrange the order by reordering the selections. You must select at least one."
+                        help="Select and arrange PDFs in the desired merge order. You must select at least one."
                     )
+                    st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Multiselect updated: {ordered_pdfs}")
                 except Exception as e:
                     st.error(f"Error in merge order selection: {e}")
                     st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in multiselect: {e}")
                     st.session_state.ordered_pdf_names_input = pdf_names
             else:
-                st.session_state.ordered_pdf_names_input = []
+                if 'ordered_pdf_names_input' in st.session_state:
+                    st.session_state.ordered_pdf_names_input = []
 
         st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
 
