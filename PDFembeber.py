@@ -23,17 +23,27 @@ def log(debug_logs, msg):
 
 # --- PDF Helper Functions ---
 def embed_files(main_pdf_bytes, files_to_embed, main_pdf_name, debug_logs):
-    """files_to_embed: list of (bytes, filename) to attach to main_pdf_bytes."""
+    """files_to_embed: list of (bytes, filename) to attach to main_pdf_bytes.
+
+    Uses pypdf's incremental-write mode: the original file's bytes are kept
+    untouched and the attachment is appended as new content after them,
+    instead of rebuilding the whole PDF object structure. This is what lets
+    a pre-existing digital signature on main_pdf_bytes keep validating
+    cryptographically (its /ByteRange still points at unchanged bytes).
+    Falls back to a full rewrite if incremental mode can't parse the file.
+    """
     log(debug_logs, f"Starting embed_files for {main_pdf_name}")
     try:
+        pdf_writer = PdfWriter(fileobj=io.BytesIO(main_pdf_bytes), incremental=True)
+        log(debug_logs, f"Loaded {len(pdf_writer.pages)} pages in incremental mode")
+    except Exception as e:
+        log(debug_logs, f"Incremental mode failed ({e}); falling back to full rewrite "
+                         f"(any existing digital signature on this file WILL be invalidated)")
         pdf_writer = PdfWriter()
         pdf_reader = PdfReader(io.BytesIO(main_pdf_bytes))
-        log(debug_logs, f"Read {len(pdf_reader.pages)} pages from main PDF")
-
-        # append() (vs. copying pages one by one) preserves the outline/bookmark
-        # tree and form fields from the source document.
         pdf_writer.append(pdf_reader)
 
+    try:
         for file_bytes, file_name in files_to_embed:
             log(debug_logs, f"Embedding file: {file_name}")
             pdf_writer.add_attachment(file_name, file_bytes)
@@ -231,6 +241,14 @@ def main():
             operation = st.radio(
                 "Choose Operation:", ["Embed files as attachments", "Merge PDFs"], horizontal=True, key="operation_input"
             )
+            if operation == "Embed files as attachments":
+                st.caption("ℹ️ If the main PDF is digitally signed, embedding tries to preserve that "
+                           "signature by appending changes instead of rewriting the file. This isn't "
+                           "guaranteed for every PDF — verify the signature afterward before relying on it.")
+            else:
+                st.caption("⚠️ Merging always invalidates the digital signature of every PDF being merged "
+                           "(the same is true in Adobe Acrobat's own 'Combine Files'). Re-sign after merging "
+                           "if you need a valid signature on the result.")
 
             additional_files = []
             if operation == "Embed files as attachments":
