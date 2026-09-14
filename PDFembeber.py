@@ -2,6 +2,7 @@ import streamlit as st
 from pypdf import PdfWriter, PdfReader
 import io
 import os
+import re
 import time
 import zipfile
 from collections import deque
@@ -97,6 +98,23 @@ def pdf_stem(filename):
     return os.path.splitext(filename)[0]
 
 
+def order_key(secondary_name, main_name, separator):
+    """Sort key for a secondary matched to main_name: the leading number
+    right after '<main_stem><separator>' controls order (e.g. the '2' in
+    'INV-001_2_signed.pdf'). Secondaries with no such number sort after
+    the numbered ones, keeping their relative upload order as a tiebreak
+    (this function only supplies the numeric part of the key; the caller
+    does a stable sort so upload order survives for ties)."""
+    remainder = pdf_stem(secondary_name)
+    prefix = pdf_stem(main_name) + separator
+    if remainder.startswith(prefix):
+        remainder = remainder[len(prefix):]
+    else:
+        remainder = ''  # exact-name match, no suffix at all
+    m = re.match(r'^(\d+)', remainder)
+    return (0, int(m.group(1))) if m else (1, 0)
+
+
 def auto_match_secondaries(main_names, secondary_names, separator):
     """Pairs secondary files to main files by filename.
 
@@ -105,6 +123,11 @@ def auto_match_secondaries(main_names, secondary_names, separator):
     after the main's stem (rather than a plain substring/prefix test) is
     what keeps e.g. 'INV-10_x' from ever matching main 'INV-1': the
     character right after 'INV-1' in 'INV-10_x' is '0', not the separator.
+
+    Within one main's matches, secondaries are ordered by a leading number
+    right after the separator (e.g. 'INV-001_1_original.pdf' before
+    'INV-001_2_signed.pdf'); secondaries with no such number keep their
+    upload order and sort after the numbered ones.
 
     Returns (matches, ambiguous):
       matches: dict main_name -> list of auto-matched secondary_names
@@ -123,6 +146,10 @@ def auto_match_secondaries(main_names, secondary_names, separator):
             matches[candidates[0]].append(s)
         elif len(candidates) > 1:
             ambiguous.append(s)
+
+    for m in main_names:
+        matches[m] = sorted(matches[m], key=lambda s: order_key(s, m, separator))
+
     return matches, ambiguous
 
 
@@ -328,7 +355,10 @@ def main():
             "Separator between a main PDF's name and a secondary file's suffix",
             value="_", max_chars=5, key="batch_separator_input",
             help="With separator '_', main 'INV-001.pdf' matches secondaries 'INV-001_signed.pdf', "
-                 "'INV-001_annex.pdf', etc. Exact-name matches (no suffix) always work too."
+                 "'INV-001_annex.pdf', etc. Exact-name matches (no suffix) always work too.\n\n"
+                 "To control the order they get attached/merged in, put a number right after the "
+                 "separator: 'INV-001_1_original.pdf' before 'INV-001_2_signed.pdf'. Secondaries "
+                 "without a number keep upload order and are placed after the numbered ones."
         )
 
         col_a, col_b = st.columns(2)
