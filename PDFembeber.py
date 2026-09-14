@@ -1,195 +1,252 @@
 import streamlit as st
-from PyPDF2 import PdfWriter, PdfReader, PdfMerger
+from pypdf import PdfWriter, PdfReader
 import io
 import os
 import time
+import zipfile
+from collections import deque
+
+# --- Config ---
+# Streamlit Community Cloud gives ~1 CPU / ~1GB RAM per app, so we deliberately
+# avoid multiprocessing (pickling overhead + resource contention isn't worth it
+# at this scale) and instead focus on keeping peak memory low: raw bytes are
+# stored instead of BytesIO wrappers, and each task's source bytes are dropped
+# from session_state the moment it's processed.
+MAX_DEBUG_LOGS = 500
+TOTAL_UPLOAD_WARNING_BYTES = 150 * 1024 * 1024  # warn past 150MB in one queue
+
+
+# --- Logging ---
+def log(debug_logs, msg):
+    debug_logs.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
 
 # --- PDF Helper Functions ---
-
-def embed_files(main_pdf_data, files_to_embed, main_pdf_name, debug_logs):
-    debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Starting embed_files for {main_pdf_name}")
+def embed_files(main_pdf_bytes, files_to_embed, main_pdf_name, debug_logs):
+    """files_to_embed: list of (bytes, filename) to attach to main_pdf_bytes."""
+    log(debug_logs, f"Starting embed_files for {main_pdf_name}")
     try:
         pdf_writer = PdfWriter()
-        main_pdf_data.seek(0)
-        pdf_reader = PdfReader(main_pdf_data)
-        debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Read {len(pdf_reader.pages)} pages from main PDF")
-        
-        for page in pdf_reader.pages:
-            pdf_writer.add_page(page)
-            
-        for file_data, file_name in files_to_embed:
-            debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Embedding file: {file_name}")
-            file_data.seek(0)
-            pdf_writer.add_attachment(file_name, file_data.read())
-            
+        pdf_reader = PdfReader(io.BytesIO(main_pdf_bytes))
+        log(debug_logs, f"Read {len(pdf_reader.pages)} pages from main PDF")
+
+        # append() (vs. copying pages one by one) preserves the outline/bookmark
+        # tree and form fields from the source document.
+        pdf_writer.append(pdf_reader)
+
+        for file_bytes, file_name in files_to_embed:
+            log(debug_logs, f"Embedding file: {file_name}")
+            pdf_writer.add_attachment(file_name, file_bytes)
+
         base_name = os.path.splitext(main_pdf_name)[0]
         output_filename = f"{base_name}_EMBEDDED.pdf"
-        
         output_buffer = io.BytesIO()
         pdf_writer.write(output_buffer)
-        debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Embedded files, output file: {output_filename}")
-        
-        return output_buffer, output_filename
+        log(debug_logs, f"Embedded files, output file: {output_filename}")
+        return output_buffer.getvalue(), output_filename
     except Exception as e:
-        debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in embed_files: {str(e)}")
+        log(debug_logs, f"Error in embed_files: {str(e)}")
         raise
 
+
 def merge_pdfs(pdf_files_data, main_pdf_name, debug_logs):
-    debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Starting merge_pdfs for {main_pdf_name}")
+    """pdf_files_data: ordered list of (bytes, filename) to merge together."""
+    log(debug_logs, f"Starting merge_pdfs for {main_pdf_name}")
     try:
         if not pdf_files_data:
             raise ValueError("No PDFs to merge")
-        merger = PdfMerger()
-        for pdf_data, pdf_name in pdf_files_data:
-            pdf_data.seek(0)
-            debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Merging file: {pdf_name}")
-            merger.append(pdf_data)
-            
+
+        writer = PdfWriter()
+        for pdf_bytes, pdf_name in pdf_files_data:
+            log(debug_logs, f"Merging file: {pdf_name}")
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            # outline_item adds a bookmark named after the source file, so the
+            # merged PDF stays navigable instead of becoming one flat page list.
+            writer.append(reader, outline_item=os.path.splitext(pdf_name)[0])
+
         base_name = os.path.splitext(main_pdf_name)[0]
         output_filename = f"{base_name}_MERGED.pdf"
-        
         output_buffer = io.BytesIO()
-        merger.write(output_buffer)
-        merger.close()
-        debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Merged PDFs, output file: {output_filename}")
-        
-        return output_buffer, output_filename
+        writer.write(output_buffer)
+        log(debug_logs, f"Merged PDFs, output file: {output_filename}")
+        return output_buffer.getvalue(), output_filename
     except Exception as e:
-        debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in merge_pdfs: {str(e)}")
+        log(debug_logs, f"Error in merge_pdfs: {str(e)}")
         raise
+
 
 def process_task(task, debug_logs):
-    debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Processing task: {task['operation']} for {task['main_pdf_name']}")
-    try:
-        if task['operation'] == "Embed files as attachments":
-            return embed_files(task['main_pdf_data'], task['additional_files'], task['main_pdf_name'], debug_logs)
-        else:  # "Merge PDFs"
-            return merge_pdfs(task['ordered_pdfs'], task['main_pdf_name'], debug_logs)
-    except Exception as e:
-        debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error processing task: {str(e)}")
-        raise
+    log(debug_logs, f"Processing task: {task['operation']} for {task['main_pdf_name']}")
+    if task['operation'] == "Embed files as attachments":
+        return embed_files(task['main_pdf_data'], task['additional_files'], task['main_pdf_name'], debug_logs)
+    else:  # "Merge PDFs"
+        return merge_pdfs(task['ordered_pdfs'], task['main_pdf_name'], debug_logs)
 
-# --- Form Callback Function ---
 
+def unique_filename(existing_names, filename):
+    """Avoid collisions when two tasks produce the same output filename."""
+    if filename not in existing_names:
+        return filename
+    base, ext = os.path.splitext(filename)
+    i = 2
+    while f"{base} ({i}){ext}" in existing_names:
+        i += 1
+    return f"{base} ({i}){ext}"
+
+
+def make_zip(results):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        used_names = set()
+        for res in results:
+            name = unique_filename(used_names, res['filename'])
+            used_names.add(name)
+            zf.writestr(name, res['data'])
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# --- Session State Helpers ---
+def reset_form_state():
+    for key in ('main_pdf_input', 'additional_files_input', 'ordered_pdf_names_input', 'default_ordered_pdfs'):
+        st.session_state.pop(key, None)
+
+
+def init_state():
+    st.session_state.setdefault('tasks', [])
+    st.session_state.setdefault('debug_logs', deque(maxlen=MAX_DEBUG_LOGS))
+    st.session_state.setdefault('processed_results', [])
+    st.session_state.setdefault('default_ordered_pdfs', [])
+
+
+# --- Form Callback: single-task mode ---
 def add_task():
-    st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Add Task callback triggered")
-    
+    debug_logs = st.session_state.debug_logs
+    log(debug_logs, "Add Task callback triggered")
+
     main_pdf = st.session_state.get('main_pdf_input')
     operation = st.session_state.get('operation_input', 'Embed files as attachments')
     additional_files = st.session_state.get('additional_files_input', [])
     ordered_pdf_names = st.session_state.get('ordered_pdf_names_input', [])
 
-    st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Main PDF: {main_pdf.name if main_pdf else 'None'}, Operation: {operation}, Additional Files: {[f.name for f in additional_files] if additional_files else []}, Ordered PDFs: {ordered_pdf_names}")
-
     if not main_pdf:
         st.error("Please upload a main PDF file.")
-        st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No main PDF uploaded")
+        log(debug_logs, "Error: No main PDF uploaded")
         return
-    if operation == "Merge PDFs":
-        if not additional_files:
-            st.error("Please upload at least one additional PDF for merging.")
-            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error: No additional PDFs for merging")
-            return
-        if not ordered_pdf_names:
-            # Fallback to default order
-            pdf_names = [main_pdf.name] + [f.name for f in additional_files]
-            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] No PDFs selected, using default order: {pdf_names}")
-            ordered_pdf_names = pdf_names
+
+    if operation == "Merge PDFs" and not additional_files:
+        st.error("Please upload at least one additional PDF for merging.")
+        log(debug_logs, "Error: No additional PDFs for merging")
+        return
+
+    if operation == "Merge PDFs" and not ordered_pdf_names:
+        ordered_pdf_names = [main_pdf.name] + [f.name for f in additional_files]
+        log(debug_logs, f"No order selected, using default order: {ordered_pdf_names}")
 
     try:
-        main_pdf_data = io.BytesIO(main_pdf.read())
-        additional_files_data = [(io.BytesIO(f.read()), f.name) for f in additional_files] if additional_files else []
-        
+        main_pdf_bytes = main_pdf.read()
+        additional_files_data = [(f.read(), f.name) for f in additional_files] if additional_files else []
+
         new_task = {
-            'main_pdf_data': main_pdf_data, 'main_pdf_name': main_pdf.name,
+            'main_pdf_data': main_pdf_bytes, 'main_pdf_name': main_pdf.name,
             'operation': operation, 'additional_files': additional_files_data, 'ordered_pdfs': None
         }
 
         if operation == "Merge PDFs":
-            all_pdfs_map = {name: data for data, name in [(main_pdf_data, main_pdf.name)] + additional_files_data}
-            final_ordered_pdfs = [(all_pdfs_map[name], name) for name in ordered_pdf_names if name in all_pdfs_map]
-            new_task['ordered_pdfs'] = final_ordered_pdfs
-            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Merge order set: {ordered_pdf_names}")
-        
+            all_pdfs_map = {name: data for data, name in [(main_pdf_bytes, main_pdf.name)] + additional_files_data}
+            new_task['ordered_pdfs'] = [(all_pdfs_map[name], name) for name in ordered_pdf_names if name in all_pdfs_map]
+            log(debug_logs, f"Merge order set: {ordered_pdf_names}")
+
         st.session_state.tasks.append(new_task)
         st.toast(f"✅ Task '{main_pdf.name}' added to queue!")
-        st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Task added, total tasks: {len(st.session_state.tasks)}")
-        
-        # Clear form inputs
-        if 'main_pdf_input' in st.session_state:
-            del st.session_state.main_pdf_input
-        if 'additional_files_input' in st.session_state:
-            del st.session_state.additional_files_input
-        if 'ordered_pdf_names_input' in st.session_state:
-            del st.session_state.ordered_pdf_names_input
-        if 'default_ordered_pdfs' in st.session_state:
-            del st.session_state.default_ordered_pdfs
-        
+        log(debug_logs, f"Task added, total tasks: {len(st.session_state.tasks)}")
+        reset_form_state()
     except Exception as e:
         st.error(f"Failed to add task: {e}")
-        st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error adding task: {e}")
+        log(debug_logs, f"Error adding task: {e}")
+
+
+# --- Form Callback: batch mode (many main PDFs, one operation applied to all) ---
+def add_batch_tasks():
+    debug_logs = st.session_state.debug_logs
+    log(debug_logs, "Add Batch Tasks callback triggered")
+
+    main_pdfs = st.session_state.get('batch_main_pdfs_input', [])
+    operation = st.session_state.get('batch_operation_input', 'Embed files as attachments')
+    shared_files = st.session_state.get('batch_shared_files_input', [])
+
+    if not main_pdfs:
+        st.error("Please upload at least one main PDF.")
+        log(debug_logs, "Error: No main PDFs uploaded for batch")
+        return
+    if not shared_files:
+        label = "PDFs to merge" if operation == "Merge PDFs" else "files to embed"
+        st.error(f"Please upload at least one {label} to apply to every main PDF.")
+        log(debug_logs, "Error: No shared files uploaded for batch")
+        return
+
+    try:
+        shared_files_data = [(f.read(), f.name) for f in shared_files]
+        added = 0
+        for main_pdf in main_pdfs:
+            main_pdf_bytes = main_pdf.read()
+            new_task = {
+                'main_pdf_data': main_pdf_bytes, 'main_pdf_name': main_pdf.name,
+                'operation': operation, 'additional_files': shared_files_data, 'ordered_pdfs': None
+            }
+            if operation == "Merge PDFs":
+                # Predictable order: this main PDF first, then the shared PDFs
+                # in the order they were uploaded.
+                new_task['ordered_pdfs'] = [(main_pdf_bytes, main_pdf.name)] + shared_files_data
+            st.session_state.tasks.append(new_task)
+            added += 1
+        st.toast(f"✅ {added} tasks added to queue!")
+        log(debug_logs, f"Batch add: {added} tasks added, total tasks: {len(st.session_state.tasks)}")
+        for key in ('batch_main_pdfs_input', 'batch_shared_files_input'):
+            st.session_state.pop(key, None)
+    except Exception as e:
+        st.error(f"Failed to add batch tasks: {e}")
+        log(debug_logs, f"Error adding batch tasks: {e}")
+
 
 # --- Main App ---
-
 def main():
+    st.set_page_config(page_title="PDF File Manager", page_icon="🚀")
     st.title("PDF File Manager 🚀")
+    init_state()
+    debug_logs = st.session_state.debug_logs
 
-    if 'tasks' not in st.session_state:
-        st.session_state.tasks = []
-    if 'debug_logs' not in st.session_state:
-        st.session_state.debug_logs = []
-    if 'processed_results' not in st.session_state:
-        st.session_state.processed_results = []
-    if 'default_ordered_pdfs' not in st.session_state:
-        st.session_state.default_ordered_pdfs = []
+    batch_mode = st.toggle(
+        "Batch mode (apply one operation to many main PDFs at once)",
+        key="batch_mode_toggle",
+        help="Off: build one task at a time with full control over merge order. "
+             "On: upload several main PDFs and apply the same attachment/merge set to each."
+    )
 
-    st.header("1. Add New Task")
+    st.header("1. Add New Task" if not batch_mode else "1. Add Batch Tasks")
 
-    with st.form(key="pdf_form", clear_on_submit=False):
-        try:
+    if not batch_mode:
+        with st.form(key="pdf_form", clear_on_submit=False):
             main_pdf = st.file_uploader("Upload Main PDF File", type=['pdf'], key="main_pdf_input")
-        except Exception as e:
-            st.error(f"Error in main PDF uploader: {e}")
-            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in main PDF uploader: {e}")
-            main_pdf = None
-
-        try:
             operation = st.radio(
                 "Choose Operation:", ["Embed files as attachments", "Merge PDFs"], horizontal=True, key="operation_input"
             )
-        except Exception as e:
-            st.error(f"Error in operation radio: {e}")
-            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in operation radio: {e}")
-            operation = "Embed files as attachments"
 
-        additional_files = []
-        if operation == "Embed files as attachments":
-            try:
+            additional_files = []
+            if operation == "Embed files as attachments":
                 additional_files = st.file_uploader(
                     "Upload Files to Embed (optional)",
                     type=['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx'],
                     accept_multiple_files=True, key="additional_files_input"
                 )
-            except Exception as e:
-                st.error(f"Error in additional files uploader: {e}")
-                st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in additional files uploader: {e}")
-            if 'ordered_pdf_names_input' in st.session_state:
-                del st.session_state.ordered_pdf_names_input
-            st.session_state.default_ordered_pdfs = []
-        else:  # "Merge PDFs"
-            try:
+            else:  # "Merge PDFs"
                 additional_files = st.file_uploader(
                     "Upload Additional PDFs to Merge (required)",
                     type=['pdf'], accept_multiple_files=True, key="additional_files_input"
                 )
-            except Exception as e:
-                st.error(f"Error in additional PDFs uploader: {e}")
-                st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in additional PDFs uploader: {e}")
-
-            if main_pdf and additional_files:
-                pdf_names = [main_pdf.name] + [f.name for f in additional_files]
-                st.session_state.default_ordered_pdfs = pdf_names
-                try:
+                if main_pdf and additional_files:
+                    pdf_names = [main_pdf.name] + [f.name for f in additional_files]
+                    st.session_state.default_ordered_pdfs = pdf_names
                     ordered_pdfs = st.multiselect(
                         "Arrange merge order (click to select/reorder):",
                         options=pdf_names,
@@ -197,78 +254,106 @@ def main():
                         key="ordered_pdf_names_input",
                         help="Select and arrange PDFs in the desired merge order. Defaults to all uploaded PDFs."
                     )
-                    st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Multiselect updated: {ordered_pdfs}")
-                except Exception as e:
-                    st.error(f"Error in merge order selection: {e}")
-                    st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in multiselect: {e}")
-                    ordered_pdfs = pdf_names
-                    st.session_state.ordered_pdf_names_input = ordered_pdfs
-            else:
-                if 'ordered_pdf_names_input' in st.session_state:
-                    del st.session_state.ordered_pdf_names_input
-                st.session_state.default_ordered_pdfs = []
+                else:
+                    st.session_state.default_ordered_pdfs = []
 
-        try:
             st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
-        except Exception as e:
-            st.error(f"Error in form submit button: {e}")
-            st.session_state.debug_logs.append(f"[{time.strftime('%H:%M:%S')}] Error in form submit button: {e}")
+    else:
+        with st.form(key="pdf_batch_form", clear_on_submit=False):
+            main_pdfs = st.file_uploader(
+                "Upload Main PDFs (one task per file)", type=['pdf'],
+                accept_multiple_files=True, key="batch_main_pdfs_input"
+            )
+            operation = st.radio(
+                "Choose Operation (applied to every main PDF):",
+                ["Embed files as attachments", "Merge PDFs"], horizontal=True, key="batch_operation_input"
+            )
+            if operation == "Embed files as attachments":
+                st.file_uploader(
+                    "Files to embed into EVERY main PDF above",
+                    type=['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx'],
+                    accept_multiple_files=True, key="batch_shared_files_input"
+                )
+            else:
+                st.file_uploader(
+                    "PDFs to merge into EVERY main PDF above (order: main PDF, then these, in upload order)",
+                    type=['pdf'], accept_multiple_files=True, key="batch_shared_files_input"
+                )
+            if main_pdfs:
+                st.caption(f"{len(main_pdfs)} main PDF(s) selected → will create {len(main_pdfs)} tasks.")
+            st.form_submit_button("➕ Add Tasks to Queue", on_click=add_batch_tasks)
 
     if st.session_state.tasks:
+        total_bytes = sum(
+            len(t['main_pdf_data']) + sum(len(d) for d, _ in t['additional_files'])
+            for t in st.session_state.tasks
+        )
+        if total_bytes > TOTAL_UPLOAD_WARNING_BYTES:
+            st.warning(
+                f"The queue is holding ~{total_bytes / (1024*1024):.0f}MB in memory. "
+                "Streamlit Community Cloud apps run with limited RAM — consider processing "
+                "in smaller batches if you hit a crash or restart."
+            )
+
         st.header("2. Process Task Queue")
         with st.expander("View Tasks", expanded=True):
             for i, task in enumerate(st.session_state.tasks):
                 st.write(f"**Task {i+1}:** {task['operation']} on '{task['main_pdf_name']}'")
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("✅ Process All Tasks", use_container_width=True, type="primary"):
-                with st.spinner("Processing..."):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("✅ Process All Tasks", use_container_width=True, type="primary"):
+                    tasks = st.session_state.tasks
+                    total = len(tasks)
+                    progress = st.progress(0.0)
+                    status = st.empty()
                     new_results = []
-                    for i, task in enumerate(st.session_state.tasks):
+                    errors = 0
+                    for i, task in enumerate(tasks):
+                        status.text(f"Processing {i+1}/{total}: {task['main_pdf_name']} ({task['operation']})")
                         try:
-                            output_buffer, output_filename = process_task(task, st.session_state.debug_logs)
-                            output_buffer.seek(0)
-                            new_results.append({'data': output_buffer.getvalue(), 'filename': output_filename})
+                            data, filename = process_task(task, debug_logs)
+                            new_results.append({'data': data, 'filename': filename})
                         except Exception as e:
-                            st.error(f"Error processing task {i+1}: {e}")
+                            errors += 1
+                            st.error(f"Error processing task {i+1} ('{task['main_pdf_name']}'): {e}")
+                        # Drop this task's source bytes now that we're done with it,
+                        # instead of waiting until the whole batch finishes.
+                        tasks[i] = None
+                        progress.progress((i + 1) / total)
+                    status.text(f"Done: {total - errors}/{total} tasks succeeded.")
                     st.session_state.processed_results.extend(new_results)
-                st.success("All tasks processed!")
-                st.session_state.tasks = []
-                if 'main_pdf_input' in st.session_state:
-                    del st.session_state.main_pdf_input
-                if 'additional_files_input' in st.session_state:
-                    del st.session_state.additional_files_input
-                if 'ordered_pdf_names_input' in st.session_state:
-                    del st.session_state.ordered_pdf_names_input
-                if 'default_ordered_pdfs' in st.session_state:
-                    del st.session_state.default_ordered_pdfs
-                st.rerun()
+                    if errors == 0:
+                        st.success("All tasks processed!")
+                    st.session_state.tasks = []
+                    reset_form_state()
+                    st.rerun()
 
-        with col2:
-            if st.button("❌ Clear All Tasks", use_container_width=True):
-                st.session_state.tasks = []
-                st.session_state.debug_logs = []
-                if 'main_pdf_input' in st.session_state:
-                    del st.session_state.main_pdf_input
-                if 'additional_files_input' in st.session_state:
-                    del st.session_state.additional_files_input
-                if 'ordered_pdf_names_input' in st.session_state:
-                    del st.session_state.ordered_pdf_names_input
-                if 'default_ordered_pdfs' in st.session_state:
-                    del st.session_state.default_ordered_pdfs
-                st.toast("🗑️ All tasks cleared.")
-                st.rerun()
-        
-        with col3:
-            if st.button("🗑️ Clear Processed Files", use_container_width=True):
-                st.session_state.processed_results = []
-                st.toast("🗑️ Processed files cleared.")
-                st.rerun()
+            with col2:
+                if st.button("❌ Clear All Tasks", use_container_width=True):
+                    st.session_state.tasks = []
+                    st.session_state.debug_logs = deque(maxlen=MAX_DEBUG_LOGS)
+                    reset_form_state()
+                    st.toast("🗑️ All tasks cleared.")
+                    st.rerun()
+
+            with col3:
+                if st.button("🗑️ Clear Processed Files", use_container_width=True):
+                    st.session_state.processed_results = []
+                    st.toast("🗑️ Processed files cleared.")
+                    st.rerun()
 
     if st.session_state.processed_results:
         st.header("3. Download Processed Files")
         with st.expander("Download Files", expanded=True):
+            if len(st.session_state.processed_results) > 1:
+                zip_bytes = make_zip(st.session_state.processed_results)
+                st.download_button(
+                    label=f"⬇️ Download all {len(st.session_state.processed_results)} files as .zip",
+                    data=zip_bytes, file_name="pdfembeber_results.zip", mime="application/zip",
+                    key="download_all_zip", type="primary"
+                )
+                st.divider()
             for i, res in enumerate(st.session_state.processed_results):
                 st.download_button(
                     label=f"Download '{res['filename']}'",
@@ -277,17 +362,18 @@ def main():
                     mime="application/pdf",
                     key=f"download_processed_{i}"
                 )
-    
-    st.subheader("Debug Logs")
-    with st.expander("View Debug Logs", expanded=False):
-        log_text = "\n".join(reversed(st.session_state.debug_logs))
-        st.text_area(
-            "Debug Log Output",
-            value=log_text,
-            height=200,
-            key="debug_log_area",
-            label_visibility="collapsed"
-        )
+
+        st.subheader("Debug Logs")
+        with st.expander("View Debug Logs", expanded=False):
+            log_text = "\n".join(reversed(debug_logs))
+            st.text_area(
+                "Debug Log Output",
+                value=log_text,
+                height=200,
+                key="debug_log_area",
+                label_visibility="collapsed"
+            )
+
 
 if __name__ == "__main__":
     main()
