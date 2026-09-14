@@ -93,6 +93,39 @@ def process_task(task, debug_logs):
         return merge_pdfs(task['ordered_pdfs'], task['main_pdf_name'], debug_logs)
 
 
+def pdf_stem(filename):
+    return os.path.splitext(filename)[0]
+
+
+def auto_match_secondaries(main_names, secondary_names, separator):
+    """Pairs secondary files to main files by filename.
+
+    A secondary matches a main if its stem equals the main's stem exactly,
+    or starts with '<main_stem><separator>'. Requiring the separator right
+    after the main's stem (rather than a plain substring/prefix test) is
+    what keeps e.g. 'INV-10_x' from ever matching main 'INV-1': the
+    character right after 'INV-1' in 'INV-10_x' is '0', not the separator.
+
+    Returns (matches, ambiguous):
+      matches: dict main_name -> list of auto-matched secondary_names
+      ambiguous: secondary_names that matched more than one main (left
+                 unassigned everywhere so the user resolves them by hand)
+    """
+    matches = {m: [] for m in main_names}
+    ambiguous = []
+    for s in secondary_names:
+        s_stem = pdf_stem(s)
+        candidates = [
+            m for m in main_names
+            if s_stem == pdf_stem(m) or s_stem.startswith(pdf_stem(m) + separator)
+        ]
+        if len(candidates) == 1:
+            matches[candidates[0]].append(s)
+        elif len(candidates) > 1:
+            ambiguous.append(s)
+    return matches, ambiguous
+
+
 def unique_filename(existing_names, filename):
     """Avoid collisions when two tasks produce the same output filename."""
     if filename not in existing_names:
@@ -176,47 +209,55 @@ def add_task():
         log(debug_logs, f"Error adding task: {e}")
 
 
-# --- Form Callback: batch mode (many main PDFs, one operation applied to all) ---
-def add_batch_tasks():
+# --- Callback: batch mode (main PDFs paired 1:N with secondary files by filename) ---
+def add_matched_batch_tasks():
     debug_logs = st.session_state.debug_logs
-    log(debug_logs, "Add Batch Tasks callback triggered")
+    log(debug_logs, "Add Matched Batch Tasks callback triggered")
 
     main_pdfs = st.session_state.get('batch_main_pdfs_input', [])
+    secondary_files = st.session_state.get('batch_secondary_files_input', [])
     operation = st.session_state.get('batch_operation_input', 'Embed files as attachments')
-    shared_files = st.session_state.get('batch_shared_files_input', [])
 
     if not main_pdfs:
         st.error("Please upload at least one main PDF.")
         log(debug_logs, "Error: No main PDFs uploaded for batch")
         return
-    if not shared_files:
-        label = "PDFs to merge" if operation == "Merge PDFs" else "files to embed"
-        st.error(f"Please upload at least one {label} to apply to every main PDF.")
-        log(debug_logs, "Error: No shared files uploaded for batch")
-        return
 
+    secondary_by_name = {f.name: f for f in secondary_files}
+    added, skipped = 0, 0
     try:
-        shared_files_data = [(f.read(), f.name) for f in shared_files]
-        added = 0
         for main_pdf in main_pdfs:
-            main_pdf_bytes = main_pdf.read()
+            selected_names = st.session_state.get(f"batch_match_{main_pdf.name}", [])
+            if not selected_names:
+                skipped += 1
+                log(debug_logs, f"Skipped '{main_pdf.name}': no matched files selected")
+                continue
+
+            main_bytes = main_pdf.getvalue()
+            secondary_data = [(secondary_by_name[n].getvalue(), n) for n in selected_names if n in secondary_by_name]
+
             new_task = {
-                'main_pdf_data': main_pdf_bytes, 'main_pdf_name': main_pdf.name,
-                'operation': operation, 'additional_files': shared_files_data, 'ordered_pdfs': None
+                'main_pdf_data': main_bytes, 'main_pdf_name': main_pdf.name,
+                'operation': operation, 'additional_files': secondary_data, 'ordered_pdfs': None
             }
             if operation == "Merge PDFs":
-                # Predictable order: this main PDF first, then the shared PDFs
-                # in the order they were uploaded.
-                new_task['ordered_pdfs'] = [(main_pdf_bytes, main_pdf.name)] + shared_files_data
+                new_task['ordered_pdfs'] = [(main_bytes, main_pdf.name)] + secondary_data
             st.session_state.tasks.append(new_task)
             added += 1
-        st.toast(f"✅ {added} tasks added to queue!")
-        log(debug_logs, f"Batch add: {added} tasks added, total tasks: {len(st.session_state.tasks)}")
-        for key in ('batch_main_pdfs_input', 'batch_shared_files_input'):
+
+        suffix = f" ({skipped} main PDF(s) skipped — no match selected)" if skipped else ""
+        st.toast(f"✅ {added} tasks added to queue!{suffix}")
+        log(debug_logs, f"Matched batch add: {added} added, {skipped} skipped, total tasks: {len(st.session_state.tasks)}")
+
+        for key in list(st.session_state.keys()):
+            if key.startswith('batch_match_'):
+                del st.session_state[key]
+        for key in ('batch_main_pdfs_input', 'batch_secondary_files_input', 'batch_fingerprint',
+                    'batch_auto_matches', 'batch_ambiguous'):
             st.session_state.pop(key, None)
     except Exception as e:
         st.error(f"Failed to add batch tasks: {e}")
-        log(debug_logs, f"Error adding batch tasks: {e}")
+        log(debug_logs, f"Error adding matched batch tasks: {e}")
 
 
 # --- Main App ---
@@ -227,10 +268,12 @@ def main():
     debug_logs = st.session_state.debug_logs
 
     batch_mode = st.toggle(
-        "Batch mode (apply one operation to many main PDFs at once)",
+        "Batch mode (pair many main PDFs with matching files by filename)",
         key="batch_mode_toggle",
         help="Off: build one task at a time with full control over merge order. "
-             "On: upload several main PDFs and apply the same attachment/merge set to each."
+             "On: upload a group of main PDFs and a group of secondary files; "
+             "they're paired automatically by filename (e.g. 'INV-001.pdf' with "
+             "'INV-001_signed.pdf'), with a preview you can adjust before queuing."
     )
 
     st.header("1. Add New Task" if not batch_mode else "1. Add Batch Tasks")
@@ -277,29 +320,93 @@ def main():
 
             st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
     else:
-        with st.form(key="pdf_batch_form", clear_on_submit=False):
+        # Not wrapped in st.form: the matching preview below needs to react
+        # live as files are uploaded, before any "submit" click.
+        st.caption("Upload your main PDFs and the files to pair with them — matches are made "
+                   "automatically by filename, and you can adjust any pairing before queuing tasks.")
+        separator = st.text_input(
+            "Separator between a main PDF's name and a secondary file's suffix",
+            value="_", max_chars=5, key="batch_separator_input",
+            help="With separator '_', main 'INV-001.pdf' matches secondaries 'INV-001_signed.pdf', "
+                 "'INV-001_annex.pdf', etc. Exact-name matches (no suffix) always work too."
+        )
+
+        col_a, col_b = st.columns(2)
+        with col_a:
             main_pdfs = st.file_uploader(
-                "Upload Main PDFs (one task per file)", type=['pdf'],
-                accept_multiple_files=True, key="batch_main_pdfs_input"
+                "Main PDFs", type=['pdf'], accept_multiple_files=True, key="batch_main_pdfs_input"
             )
+        with col_b:
             operation = st.radio(
-                "Choose Operation (applied to every main PDF):",
-                ["Embed files as attachments", "Merge PDFs"], horizontal=True, key="batch_operation_input"
+                "Operation (applied to each matched pair):",
+                ["Embed files as attachments", "Merge PDFs"], key="batch_operation_input"
             )
-            if operation == "Embed files as attachments":
-                st.file_uploader(
-                    "Files to embed into EVERY main PDF above",
-                    type=['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx'],
-                    accept_multiple_files=True, key="batch_shared_files_input"
+            secondary_types = ['pdf'] if operation == "Merge PDFs" else ['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx']
+            secondary_files = st.file_uploader(
+                "Files to pair with them", type=secondary_types,
+                accept_multiple_files=True, key="batch_secondary_files_input"
+            )
+
+        if operation == "Embed files as attachments":
+            st.caption("ℹ️ Embedding tries to preserve an existing digital signature on each main PDF "
+                       "by appending rather than rewriting — not guaranteed for every file.")
+        else:
+            st.caption("⚠️ Merging invalidates the digital signature of every PDF involved (same as "
+                       "Adobe Acrobat's 'Combine Files'). Re-sign after merging if you need one.")
+
+        if main_pdfs and secondary_files:
+            main_names = [f.name for f in main_pdfs]
+            secondary_names = [f.name for f in secondary_files]
+
+            stem_owner = {}
+            dup_stems = set()
+            for n in main_names:
+                s = pdf_stem(n)
+                if s in stem_owner:
+                    dup_stems.add(s)
+                stem_owner[s] = n
+            if dup_stems:
+                st.error(f"Several main PDFs share the same base name ({', '.join(dup_stems)}) — "
+                        "rename them so each has a unique identifier before pairing.")
+
+            fingerprint = (tuple(main_names), tuple(secondary_names), separator)
+            if st.session_state.get('batch_fingerprint') != fingerprint:
+                for key in list(st.session_state.keys()):
+                    if key.startswith('batch_match_'):
+                        del st.session_state[key]
+                st.session_state['batch_fingerprint'] = fingerprint
+                auto_matches, ambiguous = auto_match_secondaries(main_names, secondary_names, separator)
+                st.session_state['batch_auto_matches'] = auto_matches
+                st.session_state['batch_ambiguous'] = ambiguous
+
+            auto_matches = st.session_state.get('batch_auto_matches', {})
+            ambiguous = st.session_state.get('batch_ambiguous', [])
+
+            st.write(f"**Matching preview** ({len(main_names)} main, {len(secondary_names)} secondary) "
+                    "— adjust any row, then queue:")
+            for main_name in main_names:
+                st.multiselect(
+                    main_name, options=secondary_names,
+                    default=auto_matches.get(main_name, []),
+                    key=f"batch_match_{main_name}"
                 )
-            else:
-                st.file_uploader(
-                    "PDFs to merge into EVERY main PDF above (order: main PDF, then these, in upload order)",
-                    type=['pdf'], accept_multiple_files=True, key="batch_shared_files_input"
-                )
-            if main_pdfs:
-                st.caption(f"{len(main_pdfs)} main PDF(s) selected → will create {len(main_pdfs)} tasks.")
-            st.form_submit_button("➕ Add Tasks to Queue", on_click=add_batch_tasks)
+
+            assigned = set()
+            for main_name in main_names:
+                assigned.update(st.session_state.get(f"batch_match_{main_name}", []))
+            unmatched_secondaries = [n for n in secondary_names if n not in assigned]
+            unmatched_mains = [n for n in main_names if not st.session_state.get(f"batch_match_{n}", [])]
+
+            if ambiguous:
+                st.warning(f"Matched more than one main PDF — resolve manually above: {', '.join(ambiguous)}")
+            if unmatched_secondaries:
+                st.warning(f"Not assigned to any main PDF: {', '.join(unmatched_secondaries)}")
+            if unmatched_mains:
+                st.info(f"No matched files (will be skipped when queuing): {', '.join(unmatched_mains)}")
+
+            st.button("➕ Queue Matched Tasks", on_click=add_matched_batch_tasks, disabled=bool(dup_stems))
+        elif main_pdfs or secondary_files:
+            st.caption("Upload both groups of files to see the matching preview.")
 
     if st.session_state.tasks:
         total_bytes = sum(
