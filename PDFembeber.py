@@ -16,6 +16,12 @@ from collections import deque
 MAX_DEBUG_LOGS = 500
 TOTAL_UPLOAD_WARNING_BYTES = 150 * 1024 * 1024  # warn past 150MB in one queue
 
+OP_EMBED = "Embed files as attachments"
+OP_MERGE = "Merge PDFs"
+OP_INSERT = "Insert pages"
+
+POSITION_MODES = ["At the beginning", "At the end", "Before page", "After page"]
+
 
 # --- Logging ---
 def log(debug_logs, msg):
@@ -86,11 +92,77 @@ def merge_pdfs(pdf_files_data, main_pdf_name, debug_logs):
         raise
 
 
+def parse_page_spec(spec, total):
+    """'all', '1-3,5', '7-', '-4' -> list of 0-based indices (order and repeats kept)."""
+    spec = (spec or "all").strip().lower()
+    if spec in ("", "all"):
+        return list(range(total))
+    out = []
+    for part in spec.split(","):
+        part = part.strip()
+        m = re.fullmatch(r'(\d+)?\s*-\s*(\d+)?', part)
+        if m and (m.group(1) or m.group(2)):
+            a = int(m.group(1) or 1)
+            b = int(m.group(2) or total)
+        elif part.isdigit():
+            a = b = int(part)
+        else:
+            raise ValueError(f"Invalid page spec: '{part}'")
+        if a < 1 or b > total or a > b:
+            raise ValueError(f"Pages {a}-{b} out of range (source has {total} pages)")
+        out.extend(range(a - 1, b))
+    return out
+
+
+def resolve_cut(position_mode, position_page, n_pages):
+    """Returns the 0-based index in the main PDF before which the new pages go."""
+    if position_mode == "At the beginning":
+        return 0
+    if position_mode == "At the end":
+        return n_pages
+    if not 1 <= position_page <= n_pages:
+        raise ValueError(f"Page {position_page} out of range (main PDF has {n_pages} pages)")
+    return position_page - 1 if position_mode == "Before page" else position_page
+
+
+def insert_pages(base_bytes, base_name, src_bytes, src_name, page_spec,
+                 position_mode, position_page, debug_logs):
+    """Inserts selected pages of src into base at the chosen position."""
+    log(debug_logs, f"Starting insert_pages into {base_name} from {src_name}")
+    try:
+        base = PdfReader(io.BytesIO(base_bytes))
+        src = PdfReader(io.BytesIO(src_bytes))
+        n = len(base.pages)
+        indices = parse_page_spec(page_spec, len(src.pages))
+        cut = resolve_cut(position_mode, position_page, n)
+
+        writer = PdfWriter()
+        if cut > 0:
+            writer.append(base, pages=(0, cut))
+        writer.append(src, pages=indices)
+        if cut < n:
+            writer.append(base, pages=(cut, n))
+
+        output_filename = f"{pdf_stem(base_name)}_INSERTED.pdf"
+        output_buffer = io.BytesIO()
+        writer.write(output_buffer)
+        log(debug_logs, f"Inserted {len(indices)} page(s) at index {cut}; output {output_filename}")
+        return output_buffer.getvalue(), output_filename
+    except Exception as e:
+        log(debug_logs, f"Error in insert_pages: {str(e)}")
+        raise
+
+
 def process_task(task, debug_logs):
     log(debug_logs, f"Processing task: {task['operation']} for {task['main_pdf_name']}")
-    if task['operation'] == "Embed files as attachments":
+    if task['operation'] == OP_EMBED:
         return embed_files(task['main_pdf_data'], task['additional_files'], task['main_pdf_name'], debug_logs)
-    else:  # "Merge PDFs"
+    elif task['operation'] == OP_INSERT:
+        return insert_pages(task['main_pdf_data'], task['main_pdf_name'],
+                            task['source_data'], task['source_name'],
+                            task['page_spec'], task['position_mode'],
+                            task['position_page'], debug_logs)
+    else:  # OP_MERGE
         return merge_pdfs(task['ordered_pdfs'], task['main_pdf_name'], debug_logs)
 
 
@@ -178,7 +250,9 @@ def make_zip(results):
 
 # --- Session State Helpers ---
 def reset_form_state():
-    for key in ('main_pdf_input', 'additional_files_input', 'ordered_pdf_names_input', 'default_ordered_pdfs'):
+    for key in ('main_pdf_input', 'additional_files_input', 'ordered_pdf_names_input', 'default_ordered_pdfs',
+                'insert_source_input', 'insert_pages_input', 'insert_position_input',
+                'insert_position_page_input'):
         st.session_state.pop(key, None)
 
 
@@ -189,43 +263,91 @@ def init_state():
     st.session_state.setdefault('default_ordered_pdfs', [])
 
 
+def describe_task(task):
+    """One-line description for the queue view."""
+    base = f"{task['operation']} on '{task['main_pdf_name']}'"
+    if task['operation'] == OP_INSERT:
+        where = task['position_mode']
+        if where in ("Before page", "After page"):
+            where = f"{where.lower()} {task['position_page']}"
+        else:
+            where = where.lower()
+        return (f"{base} — pages '{task['page_spec']}' of '{task['source_name']}' "
+                f"inserted {where}")
+    return base
+
+
 # --- Form Callback: single-task mode ---
 def add_task():
     debug_logs = st.session_state.debug_logs
     log(debug_logs, "Add Task callback triggered")
 
     main_pdf = st.session_state.get('main_pdf_input')
-    operation = st.session_state.get('operation_input', 'Embed files as attachments')
+    operation = st.session_state.get('operation_input', OP_EMBED)
     additional_files = st.session_state.get('additional_files_input', [])
     ordered_pdf_names = st.session_state.get('ordered_pdf_names_input', [])
+    insert_source = st.session_state.get('insert_source_input')
 
     if not main_pdf:
         st.error("Please upload a main PDF file.")
         log(debug_logs, "Error: No main PDF uploaded")
         return
 
-    if operation == "Merge PDFs" and not additional_files:
+    if operation == OP_MERGE and not additional_files:
         st.error("Please upload at least one additional PDF for merging.")
         log(debug_logs, "Error: No additional PDFs for merging")
         return
 
-    if operation == "Merge PDFs" and not ordered_pdf_names:
+    if operation == OP_INSERT and not insert_source:
+        st.error("Please upload the PDF to take pages from.")
+        log(debug_logs, "Error: No source PDF for insert")
+        return
+
+    if operation == OP_MERGE and not ordered_pdf_names:
         ordered_pdf_names = [main_pdf.name] + [f.name for f in additional_files]
         log(debug_logs, f"No order selected, using default order: {ordered_pdf_names}")
 
     try:
         main_pdf_bytes = main_pdf.read()
-        additional_files_data = [(f.read(), f.name) for f in additional_files] if additional_files else []
+        additional_files_data = [(f.read(), f.name) for f in additional_files] if (
+            additional_files and operation != OP_INSERT) else []
 
         new_task = {
             'main_pdf_data': main_pdf_bytes, 'main_pdf_name': main_pdf.name,
-            'operation': operation, 'additional_files': additional_files_data, 'ordered_pdfs': None
+            'operation': operation, 'additional_files': additional_files_data, 'ordered_pdfs': None,
+            'source_data': None, 'source_name': None,
+            'page_spec': 'all', 'position_mode': 'At the end', 'position_page': 1,
         }
 
-        if operation == "Merge PDFs":
+        if operation == OP_MERGE:
             all_pdfs_map = {name: data for data, name in [(main_pdf_bytes, main_pdf.name)] + additional_files_data}
             new_task['ordered_pdfs'] = [(all_pdfs_map[name], name) for name in ordered_pdf_names if name in all_pdfs_map]
             log(debug_logs, f"Merge order set: {ordered_pdf_names}")
+
+        if operation == OP_INSERT:
+            src_bytes = insert_source.read()
+            page_spec = (st.session_state.get('insert_pages_input') or 'all').strip()
+            position_mode = st.session_state.get('insert_position_input', 'At the end')
+            position_page = int(st.session_state.get('insert_position_page_input', 1))
+
+            # Validate early so the user gets the error now, not at processing time.
+            try:
+                n_main = len(PdfReader(io.BytesIO(main_pdf_bytes)).pages)
+                n_src = len(PdfReader(io.BytesIO(src_bytes)).pages)
+                parse_page_spec(page_spec, n_src)
+                resolve_cut(position_mode, position_page, n_main)
+            except Exception as e:
+                st.error(f"Invalid insert settings: {e}")
+                log(debug_logs, f"Insert validation failed: {e}")
+                return
+
+            new_task.update({
+                'source_data': src_bytes, 'source_name': insert_source.name,
+                'page_spec': page_spec, 'position_mode': position_mode,
+                'position_page': position_page,
+            })
+            log(debug_logs, f"Insert set: pages '{page_spec}' of {insert_source.name} "
+                            f"-> {position_mode} {position_page}")
 
         st.session_state.tasks.append(new_task)
         st.toast(f"✅ Task '{main_pdf.name}' added to queue!")
@@ -243,7 +365,7 @@ def add_matched_batch_tasks():
 
     main_pdfs = st.session_state.get('batch_main_pdfs_input', [])
     secondary_files = st.session_state.get('batch_secondary_files_input', [])
-    operation = st.session_state.get('batch_operation_input', 'Embed files as attachments')
+    operation = st.session_state.get('batch_operation_input', OP_EMBED)
 
     if not main_pdfs:
         st.error("Please upload at least one main PDF.")
@@ -267,7 +389,7 @@ def add_matched_batch_tasks():
                 'main_pdf_data': main_bytes, 'main_pdf_name': main_pdf.name,
                 'operation': operation, 'additional_files': secondary_data, 'ordered_pdfs': None
             }
-            if operation == "Merge PDFs":
+            if operation == OP_MERGE:
                 new_task['ordered_pdfs'] = [(main_bytes, main_pdf.name)] + secondary_data
             st.session_state.tasks.append(new_task)
             added += 1
@@ -306,28 +428,39 @@ def main():
     st.header("1. Add New Task" if not batch_mode else "1. Add Batch Tasks")
 
     if not batch_mode:
+        # The operation radio lives OUTSIDE the form on purpose: widgets inside
+        # st.form don't trigger a rerun on change, so the operation-specific
+        # fields below would only update after submitting.
+        operation = st.radio(
+            "Choose Operation:", [OP_EMBED, OP_MERGE, OP_INSERT], horizontal=True, key="operation_input"
+        )
+
         with st.form(key="pdf_form", clear_on_submit=False):
-            main_pdf = st.file_uploader("Upload Main PDF File", type=['pdf'], key="main_pdf_input")
-            operation = st.radio(
-                "Choose Operation:", ["Embed files as attachments", "Merge PDFs"], horizontal=True, key="operation_input"
+            main_pdf = st.file_uploader(
+                "Upload Main PDF File" if operation != OP_INSERT
+                else "Upload Main PDF File (the one that will receive the pages)",
+                type=['pdf'], key="main_pdf_input"
             )
-            if operation == "Embed files as attachments":
+            if operation == OP_EMBED:
                 st.caption("ℹ️ If the main PDF is digitally signed, embedding tries to preserve that "
                            "signature by appending changes instead of rewriting the file. This isn't "
                            "guaranteed for every PDF — verify the signature afterward before relying on it.")
-            else:
+            elif operation == OP_MERGE:
                 st.caption("⚠️ Merging always invalidates the digital signature of every PDF being merged "
                            "(the same is true in Adobe Acrobat's own 'Combine Files'). Re-sign after merging "
                            "if you need a valid signature on the result.")
+            else:
+                st.caption("⚠️ Inserting pages rewrites the file and invalidates any existing digital "
+                           "signature. Re-sign afterward if you need one.")
 
             additional_files = []
-            if operation == "Embed files as attachments":
+            if operation == OP_EMBED:
                 additional_files = st.file_uploader(
                     "Upload Files to Embed (optional)",
                     type=['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx'],
                     accept_multiple_files=True, key="additional_files_input"
                 )
-            else:  # "Merge PDFs"
+            elif operation == OP_MERGE:
                 additional_files = st.file_uploader(
                     "Upload Additional PDFs to Merge (required)",
                     type=['pdf'], accept_multiple_files=True, key="additional_files_input"
@@ -335,7 +468,7 @@ def main():
                 if main_pdf and additional_files:
                     pdf_names = [main_pdf.name] + [f.name for f in additional_files]
                     st.session_state.default_ordered_pdfs = pdf_names
-                    ordered_pdfs = st.multiselect(
+                    st.multiselect(
                         "Arrange merge order (click to select/reorder):",
                         options=pdf_names,
                         default=st.session_state.default_ordered_pdfs,
@@ -344,6 +477,24 @@ def main():
                     )
                 else:
                     st.session_state.default_ordered_pdfs = []
+            else:  # OP_INSERT
+                st.file_uploader(
+                    "Upload PDF to take pages from (required)",
+                    type=['pdf'], key="insert_source_input"
+                )
+                st.text_input(
+                    "Pages to insert from that PDF", value="all", key="insert_pages_input",
+                    help="'all', '2-4', '1,3,7-9', '5-' (page 5 to the end), '-3' (first three). "
+                         "Pages are inserted in the order written, so '3,1' inserts page 3 then page 1."
+                )
+                st.selectbox(
+                    "Where to insert them in the main PDF", POSITION_MODES, index=1,
+                    key="insert_position_input"
+                )
+                st.number_input(
+                    "Main PDF page number (only used for 'Before page' / 'After page')",
+                    min_value=1, value=1, step=1, key="insert_position_page_input"
+                )
 
             st.form_submit_button("➕ Add Task to Queue", on_click=add_task)
     else:
@@ -369,15 +520,15 @@ def main():
         with col_b:
             operation = st.radio(
                 "Operation (applied to each matched pair):",
-                ["Embed files as attachments", "Merge PDFs"], key="batch_operation_input"
+                [OP_EMBED, OP_MERGE], key="batch_operation_input"
             )
-            secondary_types = ['pdf'] if operation == "Merge PDFs" else ['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx']
+            secondary_types = ['pdf'] if operation == OP_MERGE else ['pdf', 'docx', 'txt', 'jpg', 'png', 'xlsx']
             secondary_files = st.file_uploader(
                 "Files to pair with them", type=secondary_types,
                 accept_multiple_files=True, key="batch_secondary_files_input"
             )
 
-        if operation == "Embed files as attachments":
+        if operation == OP_EMBED:
             st.caption("ℹ️ Embedding tries to preserve an existing digital signature on each main PDF "
                        "by appending rather than rewriting — not guaranteed for every file.")
         else:
@@ -440,7 +591,9 @@ def main():
 
     if st.session_state.tasks:
         total_bytes = sum(
-            len(t['main_pdf_data']) + sum(len(d) for d, _ in t['additional_files'])
+            len(t['main_pdf_data'])
+            + sum(len(d) for d, _ in t['additional_files'])
+            + len(t.get('source_data') or b'')
             for t in st.session_state.tasks
         )
         if total_bytes > TOTAL_UPLOAD_WARNING_BYTES:
@@ -453,7 +606,7 @@ def main():
         st.header("2. Process Task Queue")
         with st.expander("View Tasks", expanded=True):
             for i, task in enumerate(st.session_state.tasks):
-                st.write(f"**Task {i+1}:** {task['operation']} on '{task['main_pdf_name']}'")
+                st.write(f"**Task {i+1}:** {describe_task(task)}")
 
             col1, col2, col3 = st.columns(3)
             with col1:
